@@ -11,6 +11,7 @@ from torch.utils import data
 import torch.distributed as dist
 from torchvision import transforms, utils
 from tqdm import tqdm
+import util
 
 try:
     import wandb
@@ -55,6 +56,7 @@ def accumulate(model1, model2, decay=0.999):
 
 
 def sample_data(loader):
+    # Endless iterator
     while True:
         for batch in loader:
             yield batch
@@ -293,19 +295,19 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     }
                 )
 
-            if i % 100 == 0:
+            if i % args.log_every == 0:
                 with torch.no_grad():
                     g_ema.eval()
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
                         sample,
-                        f"sample/{str(i).zfill(6)}.png",
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
                         nrow=int(args.n_sample ** 0.5),
                         normalize=True,
                         range=(-1, 1),
                     )
 
-            if i % 10000 == 0:
+            if i % args.save_every == 0:
                 torch.save(
                     {
                         "g": g_module.state_dict(),
@@ -316,7 +318,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "args": args,
                         "ada_aug_p": ada_aug_p,
                     },
-                    f"checkpoint/{str(i).zfill(6)}.pt",
+                    os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
                 )
 
 
@@ -325,7 +327,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="StyleGAN2 trainer")
 
-    parser.add_argument("path", type=str, help="path to the lmdb dataset")
+    parser.add_argument("--path", type=str, help="path to the lmdb dataset")
+    parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
+    parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
+    parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
+    parser.add_argument("--save_every", type=int, default=1000, help="save checkpoints every # iters")
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -432,6 +438,8 @@ if __name__ == "__main__":
     args.n_mlp = 8
 
     args.start_iter = 0
+    util.set_log_dir(args)
+    util.print_args(parser, args)
 
     generator = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier

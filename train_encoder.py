@@ -147,15 +147,14 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
     d_loss_val = 0
-    d_loss = torch.tensor(0.0, device=device)
-    real_pred = torch.tensor(0.0, device=device)
-    fake_pred = torch.tensor(0.0, device=device)
     r1_loss = torch.tensor(0.0, device=device)
     e_loss_val = 0
     rec_loss_val = 0
     vgg_loss_val = 0
     adv_loss_val = 0
-    loss_dict = {}
+    loss_dict = {"d": torch.tensor(0.0, device=device),
+                 "real_score": torch.tensor(0.0, device=device),
+                 "fake_score": torch.tensor(0.0, device=device)}
 
     if args.distributed:
         e_module = encoder.module

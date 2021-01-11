@@ -12,7 +12,8 @@ import torch.distributed as dist
 from torchvision import transforms, utils
 from tqdm import tqdm
 import util
-from copy import deepcopy
+import pdb
+st = pdb.set_trace
 
 try:
     import wandb
@@ -21,7 +22,6 @@ except ImportError:
     wandb = None
 
 from model import Generator, Discriminator
-from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
 from idinvert_pytorch.models.perceptual_model import VGG16
 from dataset import MultiResolutionDataset
 from distributed import (
@@ -345,6 +345,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_adv", type=float, default=0.1)
     parser.add_argument("--output_layer_idx", type=int, default=23)
     parser.add_argument('--vgg_ckpt', type=str, default='pretrained/vgg16.pth')
+    parser.add_argument('--which_encoder', type=str, default='idinvert')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -461,7 +462,6 @@ if __name__ == "__main__":
     util.set_log_dir(args)
     util.print_args(parser, args)
 
-    encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent).to(device)
     vggnet = VGG16(output_layer_idx=args.output_layer_idx).to(device)
     vgg_ckpt = torch.load(args.vgg_ckpt, map_location=lambda storage, loc: storage)
     vggnet.load_state_dict(vgg_ckpt)
@@ -478,8 +478,14 @@ if __name__ == "__main__":
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
-    # TODO: e_ema?
-    e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent).to(device)
+    if args.which_encoder == 'idinvert':
+        from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
+        encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent).to(device)
+        e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent).to(device)
+    else:
+        from model import Encoder
+        encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier).to(device)
+        e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier).to(device)
     e_ema.eval()
     accumulate(e_ema, encoder, 0)
 

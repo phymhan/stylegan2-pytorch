@@ -1,0 +1,3 @@
+[submodule "idinvert_pytorch"]
+	path = idinvert_pytorch
+	url = https://github.com/phymhan/idinvert_pytorch.git

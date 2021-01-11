@@ -470,7 +470,7 @@ class Generator(nn.Module):
         noise=None,
         randomize_noise=True,
     ):
-        if not input_is_latent:
+        if not input_is_latent:  # `style' is z, then w = self.style(z)
             styles = [self.style(s) for s in styles]
 
         if noise is None:
@@ -491,16 +491,16 @@ class Generator(nn.Module):
 
             styles = style_t
 
-        if len(styles) < 2:
+        if len(styles) < 2:  # no mixing
             inject_index = self.n_latent
 
-            if styles[0].ndim < 3:
+            if styles[0].ndim < 3:  # w is of dim [batch, 512], repeat at dim 1 for each layer
                 latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
 
-            else:
+            else:  # w is of dim [batch, num_layers, 512]
                 latent = styles[0]
 
-        else:
+        else:  # mixing
             if inject_index is None:
                 inject_index = random.randint(1, self.n_latent - 1)
 

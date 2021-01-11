@@ -136,3 +136,5 @@ data
 checkpoints*
 samples*
 logs*
+*.back
+*.bak

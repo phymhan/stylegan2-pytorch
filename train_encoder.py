@@ -463,7 +463,7 @@ if __name__ == "__main__":
 
     encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent).to(device)
     vggnet = VGG16(output_layer_idx=args.output_layer_idx).to(device)
-    vgg_ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
+    vgg_ckpt = torch.load(args.vgg_ckpt, map_location=lambda storage, loc: storage)
     vggnet.load_state_dict(vgg_ckpt)
 
     generator = Generator(
@@ -509,13 +509,6 @@ if __name__ == "__main__":
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        try:
-            ckpt_name = os.path.basename(args.ckpt)
-            args.start_iter = int(os.path.splitext(ckpt_name)[0])
-
-        except ValueError:
-            pass
-
         generator.load_state_dict(ckpt["g"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
@@ -524,6 +517,11 @@ if __name__ == "__main__":
         d_optim.load_state_dict(ckpt["d_optim"])
 
         if args.resume:
+            try:
+                ckpt_name = os.path.basename(args.ckpt)
+                args.start_iter = int(os.path.splitext(ckpt_name)[0])
+            except ValueError:
+                pass
             encoder.load_state_dict(ckpt["e"])
             e_optim.load_state_dict(ckpt["e_optim"])
 

@@ -147,6 +147,9 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
     d_loss_val = 0
+    d_loss = torch.tensor(0.0, device=device)
+    real_pred = torch.tensor(0.0, device=device)
+    fake_pred = torch.tensor(0.0, device=device)
     r1_loss = torch.tensor(0.0, device=device)
     e_loss_val = 0
     rec_loss_val = 0
@@ -219,45 +222,45 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         
         # Train Discriminator
         # requires_grad(discriminator, True)
+        if not args.no_update_discriminator:
+            latent_real = encoder(real_img)
+            fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
 
-        latent_real = encoder(real_img)
-        fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+            if args.augment:
+                real_img_aug, _ = augment(real_img, ada_aug_p)
+                fake_img_aug, _ = augment(fake_img, ada_aug_p)
+            else:
+                real_img_aug = real_img
+                fake_img_aug = fake_img
+            
+            fake_pred = discriminator(fake_img_aug)
+            real_pred = discriminator(real_img_aug)
+            d_loss = d_logistic_loss(real_pred, fake_pred)
 
-        if args.augment:
-            real_img_aug, _ = augment(real_img, ada_aug_p)
-            fake_img_aug, _ = augment(fake_img, ada_aug_p)
-        else:
-            real_img_aug = real_img
-            fake_img_aug = fake_img
-        
-        fake_pred = discriminator(fake_img_aug)
-        real_pred = discriminator(real_img_aug)
-        d_loss = d_logistic_loss(real_pred, fake_pred)
-
-        loss_dict["d"] = d_loss
-        loss_dict["real_score"] = real_pred.mean()
-        loss_dict["fake_score"] = fake_pred.mean()
-
-        discriminator.zero_grad()
-        d_loss.backward()
-        d_optim.step()
-
-        if args.augment and args.augment_p == 0:
-            ada_aug_p = ada_augment.tune(real_pred)
-            r_t_stat = ada_augment.r_t_stat
-        
-        d_regularize = i % args.d_reg_every == 0
-
-        if d_regularize:
-            # why not regularize on augmented real?
-            real_img.requires_grad = True
-            real_pred = discriminator(real_img)
-            r1_loss = d_r1_loss(real_pred, real_img)
+            loss_dict["d"] = d_loss
+            loss_dict["real_score"] = real_pred.mean()
+            loss_dict["fake_score"] = fake_pred.mean()
 
             discriminator.zero_grad()
-            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
-
+            d_loss.backward()
             d_optim.step()
+
+            if args.augment and args.augment_p == 0:
+                ada_aug_p = ada_augment.tune(real_pred)
+                r_t_stat = ada_augment.r_t_stat
+            
+            d_regularize = i % args.d_reg_every == 0
+
+            if d_regularize:
+                # why not regularize on augmented real?
+                real_img.requires_grad = True
+                real_pred = discriminator(real_img)
+                r1_loss = d_r1_loss(real_pred, real_img)
+
+                discriminator.zero_grad()
+                (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
+
+                d_optim.step()
 
         loss_dict["r1"] = r1_loss
 
@@ -340,6 +343,8 @@ if __name__ == "__main__":
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
     parser.add_argument("--save_every", type=int, default=1000, help="save checkpoints every # iters")
     parser.add_argument("--resume", action='store_true')
+    parser.add_argument("--no_update_discriminator", action='store_true')
+    parser.add_argument("--no_load_discriminator", action='store_true')
     parser.add_argument("--lambda_rec", type=float, default=1.0)
     parser.add_argument("--lambda_vgg", type=float, default=5e-5)
     parser.add_argument("--lambda_adv", type=float, default=0.1)
@@ -516,11 +521,11 @@ if __name__ == "__main__":
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
         generator.load_state_dict(ckpt["g"])
-        discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
-
-        # g_optim.load_state_dict(ckpt["g_optim"])
-        d_optim.load_state_dict(ckpt["d_optim"])
+        
+        if not args.no_load_discriminator:
+            discriminator.load_state_dict(ckpt["d"])
+            d_optim.load_state_dict(ckpt["d_optim"])
 
         if args.resume:
             try:

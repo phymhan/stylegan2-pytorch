@@ -147,14 +147,15 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
     d_loss_val = 0
-    r1_loss = torch.tensor(0.0, device=device)
     e_loss_val = 0
     rec_loss_val = 0
     vgg_loss_val = 0
     adv_loss_val = 0
-    loss_dict = {"d": torch.tensor(0.0, device=device),
-                 "real_score": torch.tensor(0.0, device=device),
-                 "fake_score": torch.tensor(0.0, device=device)}
+    loss_dict = {"d": torch.tensor(0., device=device),
+                 "real_score": torch.tensor(0., device=device),
+                 "fake_score": torch.tensor(0., device=device),
+                 "r1_d": torch.tensor(0., device=device),
+                 "r1_e": torch.tensor(0., device=device)}
 
     if args.distributed:
         e_module = encoder.module
@@ -215,6 +216,20 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         e_loss.backward()
         e_optim.step()
 
+        e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
+        if e_regularize:
+            # why not regularize on augmented real?
+            real_img.requires_grad = True
+            real_pred = encoder(real_img)
+            r1_loss_e = d_r1_loss(real_pred, real_img)
+
+            encoder.zero_grad()
+            (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred[0]).backward()
+
+            e_optim.step()
+
+            loss_dict["r1_e"] = r1_loss_e
+
         accumulate(e_ema, e_module, accum)  # TODO: ema
         
         # Train Discriminator
@@ -246,20 +261,20 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                 ada_aug_p = ada_augment.tune(real_pred)
                 r_t_stat = ada_augment.r_t_stat
             
-            d_regularize = i % args.d_reg_every == 0
-
+            d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
                 # why not regularize on augmented real?
                 real_img.requires_grad = True
                 real_pred = discriminator(real_img)
-                r1_loss = d_r1_loss(real_pred, real_img)
+                r1_loss_d = d_r1_loss(real_pred, real_img)
 
                 discriminator.zero_grad()
-                (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
+                (args.r1 / 2 * r1_loss_d * args.d_reg_every + 0 * real_pred[0]).backward()  # Why?
+                # Answer is here https://github.com/rosinality/stylegan2-pytorch/issues/76
 
                 d_optim.step()
 
-        loss_dict["r1"] = r1_loss
+                loss_dict["r1_d"] = r1_loss_d
 
         loss_reduced = reduce_loss_dict(loss_dict)
 
@@ -342,6 +357,8 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--no_update_discriminator", action='store_true')
     parser.add_argument("--no_load_discriminator", action='store_true')
+    parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
+    parser.add_argument("--no_ema", action='store_true', help="do not use ema if enabled")
     parser.add_argument("--lambda_rec", type=float, default=1.0)
     parser.add_argument("--lambda_vgg", type=float, default=5e-5)
     parser.add_argument("--lambda_adv", type=float, default=0.1)
@@ -382,14 +399,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--e_reg_every",
         type=int,
-        default=16,
-        help="interval of the applying r1 regularization",
+        default=0,
+        help="interval of the applying r1 regularization, no if 0",
     )
     parser.add_argument(
         "--d_reg_every",
         type=int,
         default=16,
-        help="interval of the applying r1 regularization",
+        help="interval of the applying r1 regularization, no if 0",
     )
     parser.add_argument(
         "--g_reg_every",
@@ -491,9 +508,11 @@ if __name__ == "__main__":
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True).to(device)
+            which_latent=args.which_latent, reshape_latent=True,
+            use_wscale=args.use_wscale).to(device)
         e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True).to(device)
+            which_latent=args.which_latent, reshape_latent=True,
+            use_wscale=args.use_wscale).to(device)
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,

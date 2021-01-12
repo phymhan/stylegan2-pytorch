@@ -453,8 +453,8 @@ if __name__ == "__main__":
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
-    g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
-    d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
+    g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1) if args.g_reg_every > 0 else 1.
+    d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1) if args.d_reg_every > 0 else 1.
 
     g_optim = optim.Adam(
         generator.parameters(),

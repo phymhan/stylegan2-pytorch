@@ -224,7 +224,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
             r1_loss_e = d_r1_loss(real_pred, real_img)
 
             encoder.zero_grad()
-            (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred[0]).backward()
+            (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
 
             e_optim.step()
 
@@ -269,8 +269,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                 r1_loss_d = d_r1_loss(real_pred, real_img)
 
                 discriminator.zero_grad()
-                (args.r1 / 2 * r1_loss_d * args.d_reg_every + 0 * real_pred[0]).backward()  # Why?
-                # Answer is here https://github.com/rosinality/stylegan2-pytorch/issues/76
+                (args.r1 / 2 * r1_loss_d * args.d_reg_every + 0 * real_pred.view(-1)[0]).backward()
+                # Why 0* ? Answer is here https://github.com/rosinality/stylegan2-pytorch/issues/76
 
                 d_optim.step()
 
@@ -280,7 +280,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
 
         d_loss_val = loss_reduced["d"].mean().item()
         e_loss_val = loss_reduced["e"].mean().item()
-        r1_val = loss_reduced["r1"].mean().item()
+        r1_d_val = loss_reduced["r1_d"].mean().item()
+        r1_e_val = loss_reduced["r1_e"].mean().item()
         rec_loss_val = loss_reduced["rec"].mean().item()
         vgg_loss_val = loss_reduced["vgg"].mean().item()
         adv_loss_val = loss_reduced["adv"].mean().item()
@@ -290,7 +291,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; e: {e_loss_val:.4f}; r1: {r1_val:.4f}; "
+                    f"d: {d_loss_val:.4f}; e: {e_loss_val:.4f}; r1_d: {r1_d_val:.4f}; r1_e: {r1_e_val:.4f}; "
                     f"rec: {rec_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}; "
                     f"augment: {ada_aug_p:.4f}"
                 )
@@ -303,7 +304,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                         "Discriminator": d_loss_val,
                         "Augment": ada_aug_p,
                         "Rt": r_t_stat,
-                        "R1": r1_val,
+                        "R1 D": r1_d_val,
+                        "R1 E": r1_e_val,
                         "Rec Loss": rec_loss_val,
                         "VGG Loss": vgg_loss_val,
                         "Adv Loss": adv_loss_val,
@@ -522,9 +524,9 @@ if __name__ == "__main__":
     e_ema.eval()
     accumulate(e_ema, encoder, 0)
 
-    # TODO: what is this used for?
-    e_reg_ratio = args.e_reg_every / (args.e_reg_every + 1)
-    d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
+    # For lazy regularization (see paper appendix page 11)
+    e_reg_ratio = args.e_reg_every / (args.e_reg_every + 1) if args.e_reg_every > 0 else 1.
+    d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1) if args.d_reg_every > 0 else 1.
 
     e_optim = optim.Adam(
         encoder.parameters(),

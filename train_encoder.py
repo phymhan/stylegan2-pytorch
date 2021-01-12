@@ -191,7 +191,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
 
         # Train Encoder
         # requires_grad(discriminator, False)
-        rec_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
+        pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
         latent_real = encoder(real_img)
         fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
 
@@ -200,28 +200,41 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                 fake_img_aug, _ = augment(fake_img, ada_aug_p)
             else:
                 fake_img_aug = fake_img
-            
             fake_pred = discriminator(fake_img_aug)
             adv_loss = g_nonsaturating_loss(fake_pred)
 
-        if args.lambda_rec > 0:
-            rec_loss = torch.mean((real_img - fake_img) ** 2)
+        if args.lambda_pix > 0:
+            pix_loss = torch.mean((real_img - fake_img) ** 2)
 
         if args.lambda_vgg > 0:
             real_feat = vggnet(real_img)
             fake_feat = vggnet(fake_img)
             vgg_loss = torch.mean((real_feat - fake_feat) ** 2)
 
-        e_loss = rec_loss*args.lambda_rec + vgg_loss*args.lambda_vgg + adv_loss*args.lambda_adv
+        e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
 
         loss_dict["e"] = e_loss
-        loss_dict["rec"] = rec_loss
+        loss_dict["pix"] = pix_loss
         loss_dict["vgg"] = vgg_loss
         loss_dict["adv"] = adv_loss
 
         encoder.zero_grad()
         e_loss.backward()
         e_optim.step()
+
+        if args.train_on_fake:
+            e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
+            if e_regularize and args.lambda_rec > 0:
+                noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+                fake_img, latent_fake = generator(noise, input_is_latent=False, return_latent=True)
+                latent_pred = encoder(fake_img)
+                if latent_pred.ndim < 3:
+                    latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
+                rec_loss = torch.mean((latent_fake - latent_pred) ** 2)
+                encoder.zero_grad()
+                (rec_loss * args.lambda_rec).backward()
+                e_optim.step()
+                loss_dict["rec"] = rec_loss
 
         e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
         if e_regularize:
@@ -232,7 +245,6 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
 
             encoder.zero_grad()
             (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
-
             e_optim.step()
 
             loss_dict["r1_e"] = r1_loss_e
@@ -279,7 +291,6 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                 discriminator.zero_grad()
                 (args.r1 / 2 * r1_loss_d * args.d_reg_every + 0 * real_pred.view(-1)[0]).backward()
                 # Why 0* ? Answer is here https://github.com/rosinality/stylegan2-pytorch/issues/76
-
                 d_optim.step()
 
                 loss_dict["r1_d"] = r1_loss_d
@@ -290,9 +301,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         e_loss_val = loss_reduced["e"].mean().item()
         r1_d_val = loss_reduced["r1_d"].mean().item()
         r1_e_val = loss_reduced["r1_e"].mean().item()
-        rec_loss_val = loss_reduced["rec"].mean().item()
+        pix_loss_val = loss_reduced["pix"].mean().item()
         vgg_loss_val = loss_reduced["vgg"].mean().item()
         adv_loss_val = loss_reduced["adv"].mean().item()
+        rec_loss_val = loss_reduced["rec"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
 
@@ -300,8 +312,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
             pbar.set_description(
                 (
                     f"d: {d_loss_val:.4f}; e: {e_loss_val:.4f}; r1_d: {r1_d_val:.4f}; r1_e: {r1_e_val:.4f}; "
-                    f"rec: {rec_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}; "
-                    f"augment: {ada_aug_p:.4f}"
+                    f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}; "
+                    f"rec: {rec_loss_val:.4f}; augment: {ada_aug_p:.4f}"
                 )
             )
 
@@ -314,9 +326,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                         "Rt": r_t_stat,
                         "R1 D": r1_d_val,
                         "R1 E": r1_e_val,
-                        "Rec Loss": rec_loss_val,
+                        "Pix Loss": pix_loss_val,
                         "VGG Loss": vgg_loss_val,
                         "Adv Loss": adv_loss_val,
+                        "Rec Loss": rec_loss_val,
                         "Real Score": real_score_val,
                         "Fake Score": fake_score_val,
                     }
@@ -372,12 +385,15 @@ if __name__ == "__main__":
     parser.add_argument("--no_load_discriminator", action='store_true')
     parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
     parser.add_argument("--no_ema", action='store_true', help="do not use ema if enabled")
-    parser.add_argument("--lambda_rec", type=float, default=1.0)
+    parser.add_argument("--train_on_fake", action='store_true', help="train encoder on fake?")
+    parser.add_argument("--e_rec_every", type=int, default=1, help="interval of minimizing recon loss on w")
+    parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_vgg", type=float, default=5e-5)
     parser.add_argument("--lambda_adv", type=float, default=0.1)
+    parser.add_argument("--lambda_rec", type=float, default=1.0, help="recon loss on style (w)")
     parser.add_argument("--output_layer_idx", type=int, default=23)
     parser.add_argument('--vgg_ckpt', type=str, default='pretrained/vgg16.pth')
-    parser.add_argument('--which_encoder', type=str, default='idinvert')
+    parser.add_argument('--which_encoder', type=str, default='style')
     parser.add_argument('--which_latent', type=str, default='w_shared')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"

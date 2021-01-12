@@ -170,12 +170,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
-    # sample_z = torch.randn(args.n_sample, args.latent, device=device)
-    sample_x = accumulate_batches(loader, args.n_sample)
-    sample_x = sample_x.to(device)
+    sample_x = accumulate_batches(loader, args.n_sample).to(device)
 
     requires_grad(generator, False)  # always False
-    generator.eval()
+    generator.eval()  # Generator should be ema and in eval mode
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -350,6 +348,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_layer_idx", type=int, default=23)
     parser.add_argument('--vgg_ckpt', type=str, default='pretrained/vgg16.pth')
     parser.add_argument('--which_encoder', type=str, default='idinvert')
+    parser.add_argument('--which_latent', type=str, default='w_shared')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -458,11 +457,18 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
         synchronize()
 
-    args.latent = 512  # fixed, dim of z
+    args.n_latent = int(np.log2(args.size)) * 2 - 2  # used in Generator
+    args.latent = 512  # fixed, dim of w or z (same size)
+    if args.which_latent == 'w':
+        args.latent_full = args.latent * args.n_latent
+    elif args.which__latent == 'w_shared':
+        args.latent_full = args.latent
+    else:
+        raise NotImplementedError
     args.n_mlp = 8
 
     args.start_iter = 0
-    args.mixing = 0  # no mixing
+    # args.mixing = 0  # no mixing
     util.set_log_dir(args)
     util.print_args(parser, args)
 
@@ -484,25 +490,23 @@ if __name__ == "__main__":
 
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
-        encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent).to(device)
-        e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent).to(device)
+        encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
+            which_latent=args.which_latent, reshape_latent=True).to(device)
+        e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
+            which_latent=args.which_latent, reshape_latent=True).to(device)
     else:
         from model import Encoder
-        encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier).to(device)
-        e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier).to(device)
+        encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+            which_latent=args.which_latent, reshape_latent=True).to(device)
+        e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+            which_latent=args.which_latent, reshape_latent=True).to(device)
     e_ema.eval()
     accumulate(e_ema, encoder, 0)
 
     # TODO: what is this used for?
-    # g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1)
     e_reg_ratio = args.e_reg_every / (args.e_reg_every + 1)
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1)
 
-    # g_optim = optim.Adam(
-    #     generator.parameters(),
-    #     lr=args.lr * g_reg_ratio,
-    #     betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio),
-    # )
     e_optim = optim.Adam(
         encoder.parameters(),
         lr=args.lr * e_reg_ratio,

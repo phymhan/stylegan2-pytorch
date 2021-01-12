@@ -470,7 +470,7 @@ class Generator(nn.Module):
         noise=None,
         randomize_noise=True,
     ):
-        if not input_is_latent:  # `style' is z, then w = self.style(z)
+        if not input_is_latent:  # if `style' is z, then get w = self.style(z)
             styles = [self.style(s) for s in styles]
 
         if noise is None:
@@ -497,7 +497,7 @@ class Generator(nn.Module):
             if styles[0].ndim < 3:  # w is of dim [batch, 512], repeat at dim 1 for each layer
                 latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
 
-            else:  # w is of dim [batch, num_layers, 512]
+            else:  # w is of dim [batch, n_latent, 512]
                 latent = styles[0]
 
         else:  # mixing
@@ -509,7 +509,7 @@ class Generator(nn.Module):
 
             latent = torch.cat([latent, latent2], 1)
 
-        out = self.input(latent)
+        out = self.input(latent)  # only batch_size of latent is used
         out = self.conv1(out, latent[:, 0], noise=noise[0])
 
         skip = self.to_rgb1(out, latent[:, 1])
@@ -661,7 +661,20 @@ class Discriminator(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, size, out_dim=512, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+    def __init__(
+        self,
+        size,
+        style_dim=512,
+        channel_multiplier=2,
+        blur_kernel=[1, 3, 3, 1],
+        which_latent='w',
+        reshape_latent=True,
+    ):
+        """
+        which_latent: 'w' predict different w for all blocks; 'w_shared' predict
+          a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
+          'wb_shared' predict shared w and different biases.
+        """
         super().__init__()
 
         channels = {
@@ -679,6 +692,11 @@ class Encoder(nn.Module):
         convs = [ConvLayer(3, channels[size], 1)]
 
         log_size = int(math.log(size, 2))
+        self.n_latent = log_size * 2 - 2  # copied from Generator
+        self.n_noises = (log_size - 2) * 2 + 1
+        self.which_latent = which_latent
+        self.reshape_latent = reshape_latent
+        self.style_dim = style_dim
 
         in_channel = channels[size]
 
@@ -695,9 +713,15 @@ class Encoder(nn.Module):
         self.stddev_feat = 1
 
         self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)
+        if self.which_latent == 'w':
+            out_channel = style_dim * self.n_latent
+        elif self.which_latent == 'w_shared':
+            out_channel = style_dim
+        else:
+            raise NotImplementedError
         self.final_linear = nn.Sequential(
             EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-            EqualLinear(channels[4], out_dim),
+            EqualLinear(channels[4], out_channel),
         )
 
     def forward(self, input):
@@ -717,5 +741,6 @@ class Encoder(nn.Module):
 
         out = out.view(batch, -1)
         out = self.final_linear(out)
-
+        if self.which_latent == 'w' and self.reshape_latent:
+            out = out.reshape(batch, self.n_latent, self.style_dim)
         return out

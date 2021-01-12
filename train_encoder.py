@@ -176,6 +176,9 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
 
+    # if args.no_ema or e_ema is None:
+    #     e_ema = encoder
+
     for idx in pbar:
         i = idx + args.start_iter
 
@@ -230,7 +233,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
 
             loss_dict["r1_e"] = r1_loss_e
 
-        accumulate(e_ema, e_module, accum)  # TODO: ema
+        if not args.no_ema and e_ema is not None:
+            accumulate(e_ema, e_module, accum)
         
         # Train Discriminator
         # requires_grad(discriminator, True)
@@ -316,10 +320,11 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
 
             if i % args.log_every == 0:
                 with torch.no_grad():
-                    e_ema.eval()
+                    e_eval = encoder if args.no_ema else e_ema
+                    e_eval.eval()
                     nrow = int(args.n_sample ** 0.5)
                     nchw = list(sample_x.shape)[1:]
-                    latent_real = e_ema(sample_x)
+                    latent_real = e_eval(sample_x)
                     fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
                     sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
@@ -330,13 +335,15 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                         normalize=True,
                         range=(-1, 1),
                     )
+                    e_eval.train()
 
             if i % args.save_every == 0:
+                e_eval = encoder if args.no_ema else e_ema
                 torch.save(
                     {
                         "e": e_module.state_dict(),
                         "d": d_module.state_dict(),
-                        "e_ema": e_ema.state_dict(),
+                        "e_ema": e_eval.state_dict(),
                         "e_optim": e_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
                         "args": args,

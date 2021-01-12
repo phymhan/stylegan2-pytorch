@@ -155,7 +155,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                  "real_score": torch.tensor(0., device=device),
                  "fake_score": torch.tensor(0., device=device),
                  "r1_d": torch.tensor(0., device=device),
-                 "r1_e": torch.tensor(0., device=device)}
+                 "r1_e": torch.tensor(0., device=device),
+                 "rec": torch.tensor(0., device=device),}
 
     if args.distributed:
         e_module = encoder.module
@@ -226,7 +227,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
             e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
             if e_regularize and args.lambda_rec > 0:
                 noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                fake_img, latent_fake = generator(noise, input_is_latent=False, return_latent=True)
+                fake_img, latent_fake = generator(noise, input_is_latent=False, return_latents=True)
                 latent_pred = encoder(fake_img)
                 if latent_pred.ndim < 3:
                     latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)

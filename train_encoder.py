@@ -191,22 +191,26 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
 
         # Train Encoder
         # requires_grad(discriminator, False)
+        rec_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
         latent_real = encoder(real_img)
         fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
 
-        if args.augment:
-            fake_img_aug, _ = augment(fake_img, ada_aug_p)
-        else:
-            fake_img_aug = fake_img
-        
-        fake_pred = discriminator(fake_img_aug)
-        adv_loss = g_nonsaturating_loss(fake_pred)
+        if args.lambda_adv > 0:
+            if args.augment:
+                fake_img_aug, _ = augment(fake_img, ada_aug_p)
+            else:
+                fake_img_aug = fake_img
+            
+            fake_pred = discriminator(fake_img_aug)
+            adv_loss = g_nonsaturating_loss(fake_pred)
 
-        rec_loss = torch.mean((real_img - fake_img) ** 2)
+        if args.lambda_rec > 0:
+            rec_loss = torch.mean((real_img - fake_img) ** 2)
 
-        real_feat = vggnet(real_img)
-        fake_feat = vggnet(fake_img)
-        vgg_loss = torch.mean((real_feat - fake_feat) ** 2)
+        if args.lambda_vgg > 0:
+            real_feat = vggnet(real_img)
+            fake_feat = vggnet(fake_img)
+            vgg_loss = torch.mean((real_feat - fake_feat) ** 2)
 
         e_loss = rec_loss*args.lambda_rec + vgg_loss*args.lambda_vgg + adv_loss*args.lambda_adv
 
@@ -238,7 +242,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         
         # Train Discriminator
         # requires_grad(discriminator, True)
-        if not args.no_update_discriminator:
+        if not args.no_update_discriminator and args.lambda_adv > 0:
             latent_real = encoder(real_img)
             fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
 
@@ -514,22 +518,26 @@ if __name__ == "__main__":
     g_ema.eval()
     accumulate(g_ema, generator, 0)
 
+    e_ema = None
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
             which_latent=args.which_latent, reshape_latent=True,
             use_wscale=args.use_wscale).to(device)
-        e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
-            use_wscale=args.use_wscale).to(device)
+        if not args.no_ema:
+            e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
+                which_latent=args.which_latent, reshape_latent=True,
+                use_wscale=args.use_wscale).to(device)
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
             which_latent=args.which_latent, reshape_latent=True).to(device)
-        e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True).to(device)
-    e_ema.eval()
-    accumulate(e_ema, encoder, 0)
+        if not args.no_ema:
+            e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+                which_latent=args.which_latent, reshape_latent=True).to(device)
+    if not args.no_ema:
+        e_ema.eval()
+        accumulate(e_ema, encoder, 0)
 
     # For lazy regularization (see paper appendix page 11)
     e_reg_ratio = args.e_reg_every / (args.e_reg_every + 1) if args.e_reg_every > 0 else 1.

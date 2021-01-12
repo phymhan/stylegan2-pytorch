@@ -161,9 +161,11 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
     if args.distributed:
         e_module = encoder.module
         d_module = discriminator.module
+        g_module = generator.module
     else:
         e_module = encoder
         d_module = discriminator
+        g_module = generator
 
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
@@ -361,6 +363,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                     {
                         "e": e_module.state_dict(),
                         "d": d_module.state_dict(),
+                        "g_ema": g_module.state_dict(),
                         "e_ema": e_eval.state_dict(),
                         "e_optim": e_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
@@ -393,9 +396,9 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_adv", type=float, default=0.1)
     parser.add_argument("--lambda_rec", type=float, default=1.0, help="recon loss on style (w)")
     parser.add_argument("--output_layer_idx", type=int, default=23)
-    parser.add_argument('--vgg_ckpt', type=str, default='pretrained/vgg16.pth')
-    parser.add_argument('--which_encoder', type=str, default='style')
-    parser.add_argument('--which_latent', type=str, default='w_shared')
+    parser.add_argument("--vgg_ckpt", type=str, default="pretrained/vgg16.pth")
+    parser.add_argument("--which_encoder", type=str, default='style')
+    parser.add_argument("--which_latent", type=str, default='w_shared')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -523,17 +526,17 @@ if __name__ == "__main__":
     vgg_ckpt = torch.load(args.vgg_ckpt, map_location=lambda storage, loc: storage)
     vggnet.load_state_dict(vgg_ckpt)
 
-    generator = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
-    ).to(device)
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier
     ).to(device)
+    # generator = Generator(
+    #     args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
+    # ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
     ).to(device)
     g_ema.eval()
-    accumulate(g_ema, generator, 0)
+    # accumulate(g_ema, generator, 0)
 
     e_ema = None
     if args.which_encoder == 'idinvert':
@@ -576,8 +579,11 @@ if __name__ == "__main__":
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        generator.load_state_dict(ckpt["g"])
-        g_ema.load_state_dict(ckpt["g_ema"])
+        # generator.load_state_dict(ckpt["g"])
+        if 'g_ema' in ckpt:
+            g_ema.load_state_dict(ckpt["g_ema"])
+        else:
+            g_ema.load_state_dict(ckpt["g"])
         
         if not args.no_load_discriminator:
             discriminator.load_state_dict(ckpt["d"])
@@ -600,12 +606,12 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
-        generator = nn.parallel.DistributedDataParallel(
-            generator,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
+        # generator = nn.parallel.DistributedDataParallel(
+        #     generator,
+        #     device_ids=[args.local_rank],
+        #     output_device=args.local_rank,
+        #     broadcast_buffers=False,
+        # )
 
         discriminator = nn.parallel.DistributedDataParallel(
             discriminator,

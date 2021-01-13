@@ -5,7 +5,9 @@ import numpy as np
 from PIL import Image
 import cv2
 import random
+import pickle
 
+_IMGEXT = 'jpg'
 
 def get_frames(vidpath, image_size=0, every_nth=1, trim_len=float('Inf')):
     # get frames as list of images, return a list of list
@@ -38,13 +40,17 @@ if __name__ == '__main__':
     parser.add_argument('--num_identities', type=int, default=100)
     parser.add_argument('--trim_len', type=float, default=float('Inf'))
     parser.add_argument('--every_nth', type=int, default=1)
-    parser.add_argument('--num_clips_per_video', type=int, default=2)
+    parser.add_argument('--num_utterance_per_video', type=int, default=1)
+    parser.add_argument('--num_clips_per_utterance', type=int, default=1)
+    parser.add_argument('--cache', type=str, default='')
     args = parser.parse_args()
 
     # sys.path.append('..')
     seed = 42
     random.seed(seed)
     np.random.seed(seed)
+    if not os.path.exists(args.dest_data_root):
+        os.mkdir(args.dest_data_root)
     ids_file = os.path.join(args.dest_data_root, f'id_{args.num_identities}_seed_{seed}.txt')
     if os.path.exists(ids_file):
         with open(ids_file, 'r') as f:
@@ -57,25 +63,36 @@ if __name__ == '__main__':
             for id in ids:
                 f.write(f'{id}\n')
     
+    videopaths = []  # a list of list
     for id in ids:
-        folders = os.listdir(os.path.join(args.raw_data_root, id))
+        videos = os.listdir(os.path.join(args.raw_data_root, id))
         if not os.path.exists(os.path.join(args.dest_data_root, id)):
             os.mkdir(os.path.join(args.dest_data_root, id))
-        for folder in folders:
-            if folder.endswith('.png'):
+        for video in videos:
+            if video.endswith('.png'):
                 continue
-            videos = os.listdir(os.path.join(args.raw_data_root, id, folder))
-            for video in videos:
-                vidpath = os.path.join(args.raw_data_root, id, folder, video)
-                clips = get_frames(vidpath, args.image_size, args.every_nth, args.trim_len)
+            utterances = os.listdir(os.path.join(args.raw_data_root, id, video))
+            idx_utterance = range(len(utterances))
+            idx_utterance = np.sort(np.random.choice(idx_utterance, min(len(utterances), args.num_utterance_per_video), False))
+            for i in idx_utterance:
+                utterance = utterances[i]
+                mp4path = os.path.join(args.raw_data_root, id, video, utterance)
+                clips = get_frames(mp4path, args.image_size, args.every_nth, args.trim_len)
                 # clips = [[frames_for_clip_1], ...]
                 idx_clip = range(len(clips))
                 idx_clip = np.sort(np.random.choice(idx_clip, min(len(clips), args.num_clips_per_video), False))
                 for j in idx_clip:
-                    clippath = os.path.join(args.dest_data_root, id, f'{folder}-{video}_{j:02d}')
+                    clippath = os.path.join(args.dest_data_root, id, f'{video}-{utterance}_{j:02d}')
                     if not os.path.exists(clippath):
                         os.mkdir(clippath)
+                    clippaths = []
                     for k, img in enumerate(clips[j]):
-                        imgpath = os.path.join(clippath, f'{k:07d}.jpg')
+                        imgpath = os.path.join(clippath, f'{k:07d}.{_IMGEXT}')
+                        clippaths.append(os.path.join(id, f'{video}-{utterance}_{j:02d}', f'{k:07d}.{_IMGEXT}'))
                         cv2.imwrite(imgpath, img)
-                print(f'=> video {vidpath}')
+                    videopaths.append(clippaths)
+            print(f'=> {id} {video}')
+    
+    if args.cache:
+        with open(args.cache, 'wb') as f:
+            pickle.dump(videopaths, f)

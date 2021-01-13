@@ -80,7 +80,7 @@ if __name__ == '__main__':
                 clips = get_frames(mp4path, args.image_size, args.every_nth, args.trim_len)
                 # clips = [[frames_for_clip_1], ...]
                 idx_clip = range(len(clips))
-                idx_clip = np.sort(np.random.choice(idx_clip, min(len(clips), args.num_clips_per_video), False))
+                idx_clip = np.sort(np.random.choice(idx_clip, min(len(clips), args.num_clips_per_utterance), False))
                 for j in idx_clip:
                     clippath = os.path.join(args.dest_data_root, id, f'{video}-{utterance}_{j:02d}')
                     if not os.path.exists(clippath):

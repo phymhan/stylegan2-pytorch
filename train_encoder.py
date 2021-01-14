@@ -369,6 +369,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                         "d_optim": d_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
+                        "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
                 )
@@ -608,7 +609,10 @@ if __name__ == "__main__":
         if args.resume:
             try:
                 ckpt_name = os.path.basename(args.ckpt)
-                args.start_iter = int(os.path.splitext(ckpt_name)[0])
+                if 'latest' in ckpt_name and 'iter' in ckpt:
+                    args.start_iter = ckpt["iter"]
+                else:
+                    args.start_iter = int(os.path.splitext(ckpt_name)[0])
             except ValueError:
                 pass
             encoder.load_state_dict(ckpt["e"])
@@ -621,13 +625,6 @@ if __name__ == "__main__":
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
-
-        # generator = nn.parallel.DistributedDataParallel(
-        #     generator,
-        #     device_ids=[args.local_rank],
-        #     output_device=args.local_rank,
-        #     broadcast_buffers=False,
-        # )
 
         discriminator = nn.parallel.DistributedDataParallel(
             discriminator,

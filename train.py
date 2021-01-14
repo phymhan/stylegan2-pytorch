@@ -483,14 +483,17 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
-    if args.ckpt is not None:
+    if args.ckpt is not None:  # resume
         print("load model:", args.ckpt)
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
         try:
             ckpt_name = os.path.basename(args.ckpt)
-            args.start_iter = int(os.path.splitext(ckpt_name)[0])
+            if 'latest' in ckpt_name and 'iter' in ckpt:
+                args.start_iter = ckpt["iter"]
+            else:
+                args.start_iter = int(os.path.splitext(ckpt_name)[0])
 
         except ValueError:
             pass

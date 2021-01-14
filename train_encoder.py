@@ -372,18 +372,34 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
                     },
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
                 )
+            
+            if i % args.save_latest_every == 0:
+                torch.save(
+                    {
+                        "e": e_module.state_dict(),
+                        "d": d_module.state_dict(),
+                        "g_ema": g_module.state_dict(),
+                        "e_ema": e_eval.state_dict(),
+                        "e_optim": e_optim.state_dict(),
+                        "d_optim": d_optim.state_dict(),
+                        "args": args,
+                        "ada_aug_p": ada_aug_p,
+                    },
+                    os.path.join(args.log_dir, 'weight', f"latest.pt"),
+                )
 
 
 if __name__ == "__main__":
     device = "cuda"
 
-    parser = argparse.ArgumentParser(description="StyleGAN2 trainer")
+    parser = argparse.ArgumentParser(description="StyleGAN2 encoder trainer")
 
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
     parser.add_argument("--save_every", type=int, default=1000, help="save checkpoints every # iters")
+    parser.add_argument("--save_latest_every", type=int, default=100, help="save latest checkpoints every # iters")
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--no_update_discriminator", action='store_true')
     parser.add_argument("--no_load_discriminator", action='store_true')

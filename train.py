@@ -320,6 +320,21 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     },
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
                 )
+            
+            if i % args.save_latest_every == 0:
+                torch.save(
+                    {
+                        "g": g_module.state_dict(),
+                        "d": d_module.state_dict(),
+                        "g_ema": g_ema.state_dict(),
+                        "g_optim": g_optim.state_dict(),
+                        "d_optim": d_optim.state_dict(),
+                        "args": args,
+                        "ada_aug_p": ada_aug_p,
+                        "iter": i,
+                    },
+                    os.path.join(args.log_dir, 'weight', f"latest.pt"),
+                )
 
 
 if __name__ == "__main__":
@@ -332,6 +347,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
     parser.add_argument("--save_every", type=int, default=1000, help="save checkpoints every # iters")
+    parser.add_argument("--save_latest_every", type=int, default=100, help="save latest checkpoints every # iters")
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )

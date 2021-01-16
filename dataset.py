@@ -89,6 +89,7 @@ class VideoFolderDataset(Dataset):
                 if len(frame_list) >= min_len:
                     video_list.append(frame_list)
                     length_list.append(len(frame_list))
+                frame_list = frames = None  # empty
             self.videos, self.lengths = video_list, length_list
             if cache is not None:
                 with open(cache, 'wb') as f:

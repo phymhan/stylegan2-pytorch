@@ -78,7 +78,8 @@ class VideoFolderDataset(Dataset):
             length_list = []
             for i, video in enumerate(tqdm.tqdm(os.listdir(dataroot), desc="Counting videos")):
                 try:
-                    frames = sorted(os.listdir(os.path.join(dataroot, video)))
+                    if os.path.isdir(os.path.join(dataroot, video)):
+                        frames = sorted(os.listdir(os.path.join(dataroot, video)))
                 except ValueError:
                     continue
                 frame_list = []

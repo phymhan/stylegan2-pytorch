@@ -9,6 +9,8 @@ import os
 import numpy as np
 import tqdm
 
+IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm']
+
 
 def is_image_file(filename):
     """Checks if a file is an image.

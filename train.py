@@ -343,6 +343,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StyleGAN2 trainer")
 
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
+    parser.add_argument("--dataset", type=str, default='multires')
+    parser.add_argument("--cache", type=str, default='local.db')
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")

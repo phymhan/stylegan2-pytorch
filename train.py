@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from torch.utils import data
 import torch.distributed as dist
 from torchvision import transforms, utils
+from PIL import Image
 from tqdm import tqdm
 import util
 
@@ -522,17 +523,25 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
-    transform = transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-        ]
-    )
-
     if args.dataset == 'multires':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
         dataset = MultiResolutionDataset(args.path, transform, args.size)
     elif args.dataset == 'videofolder':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.Resize(args.size, Image.LANCZOS),
+                transforms.CenterCrop(args.size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
         dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
     loader = data.DataLoader(
         dataset,

@@ -23,7 +23,7 @@ except ImportError:
 
 from model import Generator, Discriminator
 from idinvert_pytorch.models.perceptual_model import VGG16
-from dataset import MultiResolutionDataset
+from dataset import MultiResolutionDataset, VideoFolderDataset
 from distributed import (
     get_rank,
     synchronize,
@@ -396,6 +396,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StyleGAN2 encoder trainer")
 
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
+    parser.add_argument("--dataset", type=str, default='multires')
+    parser.add_argument("--cache", type=str, default='local.db')
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
@@ -640,8 +642,10 @@ if __name__ == "__main__":
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
         ]
     )
-
-    dataset = MultiResolutionDataset(args.path, transform, args.size)
+    if args.dataset == 'multires':
+        dataset = MultiResolutionDataset(args.path, transform, args.size)
+    elif args.dataset == 'videofolder':
+        dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

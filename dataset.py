@@ -3,9 +3,11 @@ from io import BytesIO
 import lmdb
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import transforms
 import pickle
 import os
 import numpy as np
+import tqdm
 
 
 def is_image_file(filename):
@@ -59,19 +61,20 @@ class MultiResolutionDataset(Dataset):
 class VideoFolderDataset(Dataset):
     def __init__(self, dataroot, transform=None, mode='video', min_len=8, cache=None):
         self.root = dataroot
-        self.transform = transform or lambda x: x
+        self.transform = transform or transforms.ToTensor()
         self.cache = cache
         self.mode = mode
         self.min_len = min_len
         self.videos = []
         self.lengths = []
+        assert(mode in ['video', 'image', 'pair'])
         if cache is not None and os.path.exists(cache):
             with open(cache, 'rb') as f:
                 self.videos, self.lengths = pickle.load(f)
         else:
             video_list = []
             length_list = []
-            for i, video in enumerate(os.listdir(dataroot)):
+            for i, video in enumerate(tqdm.tqdm(os.listdir(dataroot), desc="Counting videos")):
                 try:
                     frames = sorted(os.listdir(os.path.join(dataroot, video)))
                 except ValueError:
@@ -92,10 +95,11 @@ class VideoFolderDataset(Dataset):
         print("Total numver of videos {}.".format(len(self.videos)))
         print("Total number of frames {}.".format(np.sum(self.lengths)))
 
-    def _get_video(self, index, n_frames):
+    def _get_video(self, index):
         # copied from Yu
         video = self.videos[index]
         video_len = self.lengths[index]
+        n_frames = 50
         
         start_idx = random.randint(0, video_len-1-n_frames*FRAME_STEP)
         img = Image.open(video[0])
@@ -139,8 +143,16 @@ class VideoFolderDataset(Dataset):
             video_id = np.searchsorted(self.cumsum, index) - 1
             frame_id = index - self.cumsum[video_id] - 1
         frame = Image.open(self.videos[video_id][frame_id])
-        frame = self.transform(np.array(frame))
+        frame = self.transform(frame)
         return frame
+    
+    def __getitem__(self, index):
+        if self.mode == 'video':
+            return self._get_video(index)
+        elif self.mode == 'image':
+            return self._get_image(index)
+        else:  # 'pair'
+            return None
 
 
     def __len__(self):

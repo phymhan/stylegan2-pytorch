@@ -20,7 +20,7 @@ except ImportError:
     wandb = None
 
 from model import Generator, Discriminator
-from dataset import MultiResolutionDataset
+from dataset import MultiResolutionDataset, VideoFolderDataset
 from distributed import (
     get_rank,
     synchronize,
@@ -528,7 +528,10 @@ if __name__ == "__main__":
         ]
     )
 
-    dataset = MultiResolutionDataset(args.path, transform, args.size)
+    if args.dataset == 'multires':
+        dataset = MultiResolutionDataset(args.path, transform, args.size)
+    elif args.dataset == 'videofolder':
+        dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

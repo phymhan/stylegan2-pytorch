@@ -145,7 +145,7 @@ class VideoFolderDataset(Dataset):
         else:
             video_id = np.searchsorted(self.cumsum, index) - 1
             frame_id = index - self.cumsum[video_id] - 1
-        frame = Image.open(self.videos[video_id][frame_id])
+        frame = Image.open(os.path.join(self.root, self.videos[video_id][frame_id]))
         frame = self.transform(frame)
         return frame
     

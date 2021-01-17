@@ -539,7 +539,7 @@ if __name__ == "__main__":
             [
                 # transforms.ToTensor(),  # this should be done in loader
                 transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size, Image.LANCZOS),
+                transforms.Resize(args.size),  # Image.LANCZOS
                 transforms.CenterCrop(args.size),
                 # transforms.ToTensor(),  # normally placed here
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),

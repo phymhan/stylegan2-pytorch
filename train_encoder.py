@@ -182,7 +182,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
 
     # if args.no_ema or e_ema is None:
     #     e_ema = encoder
-
+    
     for idx in pbar:
         i = idx + args.start_iter
 
@@ -194,7 +194,9 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
         real_img = real_img.to(device)
 
         # Train Encoder
-        # requires_grad(discriminator, False)
+        if args.toggle_grads:
+            requires_grad(encoder, True)
+            requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
         latent_real = encoder(real_img)
         fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
@@ -257,7 +259,9 @@ def train(args, loader, encoder, generator, discriminator, vggnet, e_optim, d_op
             accumulate(e_ema, e_module, accum)
         
         # Train Discriminator
-        # requires_grad(discriminator, True)
+        if args.toggle_grads:
+            requires_grad(encoder, False)
+            requires_grad(discriminator, True)
         if not args.no_update_discriminator and args.lambda_adv > 0:
             latent_real = encoder(real_img)
             fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
@@ -407,6 +411,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--no_update_discriminator", action='store_true')
     parser.add_argument("--no_load_discriminator", action='store_true')
+    parser.add_argument("--toggle_grads", action='store_true')
     parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
     parser.add_argument("--no_ema", action='store_true', help="do not use ema if enabled")
     parser.add_argument("--train_on_fake", action='store_true', help="train encoder on fake?")
@@ -646,12 +651,15 @@ if __name__ == "__main__":
         )
         dataset = MultiResolutionDataset(args.path, transform, args.size)
     elif args.dataset == 'videofolder':
+        # [Note] Potentially, same transforms will be applied to a batch of images,
+        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
         transform = transforms.Compose(
             [
+                # transforms.ToTensor(),  # this should be done in loader
                 transforms.RandomHorizontalFlip(),
                 transforms.Resize(args.size, Image.LANCZOS),
                 transforms.CenterCrop(args.size),
-                transforms.ToTensor(),
+                # transforms.ToTensor(),  # normally placed here
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
             ]
         )

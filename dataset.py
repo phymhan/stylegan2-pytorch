@@ -2,12 +2,15 @@ from io import BytesIO
 
 import lmdb
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+import torchvision.transforms.functional as F
 import pickle
 import os
 import numpy as np
 import tqdm
+import random
 
 IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm']
 
@@ -61,15 +64,27 @@ class MultiResolutionDataset(Dataset):
 
 
 class VideoFolderDataset(Dataset):
-    def __init__(self, dataroot, transform=None, mode='video', min_len=8, cache=None):
-        self.root = dataroot
-        self.transform = transform or transforms.ToTensor()
-        self.cache = cache
+    def __init__(
+        self,
+        dataroot,
+        transform=None,
+        mode='video',
+        min_len=8,
+        frame_num=8,
+        frame_step=1,
+        cache=None,
+    ):
+        assert(mode in ['video', 'image', 'pair'])
         self.mode = mode
+        self.root = dataroot
+        self.cache = cache
+        self.transform = transform or transforms.ToTensor()
         self.min_len = min_len
+        self.frame_num = frame_num
+        self.frame_step = frame_step
         self.videos = []
         self.lengths = []
-        assert(mode in ['video', 'image', 'pair'])
+        
         if cache is not None and os.path.exists(cache):
             with open(cache, 'rb') as f:
                 self.videos, self.lengths = pickle.load(f)
@@ -95,47 +110,30 @@ class VideoFolderDataset(Dataset):
                 with open(cache, 'wb') as f:
                     pickle.dump((self.videos, self.lengths), f)
         self.cumsum = np.cumsum([0] + self.lengths)
+        self.lengths1 = [i - 1 for i in self.lengths]
+        self.cumsum1 = np.cumsum([0] + self.lengths1)
         print("Total numver of videos {}.".format(len(self.videos)))
         print("Total number of frames {}.".format(np.sum(self.lengths)))
+        if self.mode == 'video':
+            self.__getitem__ = self._get_video
+            self._dataset_length = len(self.videos)
+        elif self.mode == 'image':
+            self.__getitem__ = self._get_image
+            self._dataset_length = np.sum(self.lengths)
+        else:  # self.mode == 'pair'
+            self.__getitem__ = self._get_pair
+            self._dataset_length = np.sum(self.lengths1)
 
     def _get_video(self, index):
-        # copied from Yu
-        video = self.videos[index]
         video_len = self.lengths[index]
-        n_frames = 50
-        
-        start_idx = random.randint(0, video_len-1-n_frames*FRAME_STEP)
-        img = Image.open(video[0])
-        h, w = img.height, img.width
-        
-        NEED_CROP = False
-        if h > w:
-            NEED_CROP = True
-            half = (h-w) // 2
-            cropsize = (0, half, w, half+w) # left, upper, right, lower
-        elif w > h:
-            NEED_CROP = True
-            half = (w-h) // 2
-            cropsize = (half, 0, half+h, h)
-
-        images = []
-        
-        for i in range(start_idx, start_idx+n_frames*FRAME_STEP, FRAME_STEP):
-            path = video[i]
-            img = Image.open(path)
-            if NEED_CROP:
-                img = img.crop(cropsize)
-            if img.height != img.width:
-                print('crop error!')
-                abc = 1
-            img = img.resize(self.opt.fineSize, Image.ANTIALIAS)
-            img = np.asarray(img, dtype=np.float32)
-            img /= 255.
-            img_tensor = preprocess(img).unsqueeze(0)
-            images.append(img_tensor)
-        
-        video_clip = torch.cat(images)
-        return video_clip
+        start_idx = random.randint(0, video_len-1-self.frame_num*self.frame_step)
+        frames = []
+        for i in range(start_idx, start_idx+self.frame_num*self.frame_step, self.frame_step):
+            img = Image.open(os.path.join(self.root, self.videos[index][i]))
+            frames.append(F.to_tensor(img))
+        frames = torch.stack(frames, 0)
+        frames = self.transform(frames)
+        return frames
     
     def _get_image(self, index):
         # copied from MoCoGAN
@@ -146,17 +144,25 @@ class VideoFolderDataset(Dataset):
             video_id = np.searchsorted(self.cumsum, index) - 1
             frame_id = index - self.cumsum[video_id] - 1
         frame = Image.open(os.path.join(self.root, self.videos[video_id][frame_id]))
-        frame = self.transform(frame)
+        frame = F.to_tensor(frame)
+        frame = self.transform(frame)  # no ToTensor in transform
         return frame
     
-    def __getitem__(self, index):
-        if self.mode == 'video':
-            return self._get_video(index)
-        elif self.mode == 'image':
-            return self._get_image(index)
-        else:  # 'pair'
-            return None
-
+    def _get_pair(self, index):
+        if index == 0:
+            video_id = 0
+            frame_id = 0
+        else:
+            video_id = np.searchsorted(self.cumsum1, index) - 1
+            frame_id = index - self.cumsum1[video_id] - 1
+        frame1 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id]))
+        frame1 = F.to_tensor(frame1)
+        frame2 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id + 1]))
+        frame2 = F.to_tensor(frame2)
+        # We should apply identical transforms to frame1 & frame2
+        frames = torch.stack([frame1, frame2], 0)
+        frames = self.transform(frames)
+        return frames.unbind(0)
 
     def __len__(self):
-        return len(self.videos) if self.mode == 'video' else np.sum(self.lengths)
+        return self._dataset_length

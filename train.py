@@ -533,12 +533,15 @@ if __name__ == "__main__":
         )
         dataset = MultiResolutionDataset(args.path, transform, args.size)
     elif args.dataset == 'videofolder':
+        # [Note] Potentially, same transforms will be applied to a batch of images,
+        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
         transform = transforms.Compose(
             [
+                # transforms.ToTensor(),  # this should be done in loader
                 transforms.RandomHorizontalFlip(),
                 transforms.Resize(args.size, Image.LANCZOS),
                 transforms.CenterCrop(args.size),
-                transforms.ToTensor(),
+                # transforms.ToTensor(),  # normally placed here
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
             ]
         )

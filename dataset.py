@@ -115,13 +115,13 @@ class VideoFolderDataset(Dataset):
         print("Total numver of videos {}.".format(len(self.videos)))
         print("Total number of frames {}.".format(np.sum(self.lengths)))
         if self.mode == 'video':
-            self.__getitem__ = self._get_video
+            # self.__getitem__ = self._get_video
             self._dataset_length = len(self.videos)
         elif self.mode == 'image':
-            self.__getitem__ = self._get_image
+            # self.__getitem__ = self._get_image
             self._dataset_length = np.sum(self.lengths)
         else:  # self.mode == 'pair'
-            self.__getitem__ = self._get_pair
+            # self.__getitem__ = self._get_pair
             self._dataset_length = np.sum(self.lengths1)
 
     def _get_video(self, index):
@@ -163,6 +163,14 @@ class VideoFolderDataset(Dataset):
         frames = torch.stack([frame1, frame2], 0)
         frames = self.transform(frames)
         return frames.unbind(0)
+    
+    def __getitem__(self, index):
+        if self.mode == 'video':
+            return self._get_video(index)
+        elif self.mode == 'image':
+            return self._get_image(index)
+        else:  # self.mode == 'pair'
+            return self._get_pair(index)
 
     def __len__(self):
         return self._dataset_length

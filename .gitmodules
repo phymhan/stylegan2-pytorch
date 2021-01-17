@@ -1,3 +1,6 @@
 [submodule "idinvert_pytorch"]
 	path = idinvert_pytorch
 	url = https://github.com/phymhan/idinvert_pytorch.git
+[submodule "vid2vid"]
+	path = vid2vid
+	url = https://github.com/phymhan/vid2vid.git

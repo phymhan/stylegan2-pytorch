@@ -240,9 +240,7 @@ if __name__ == "__main__":
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
     ).to(device)
     g_ema.eval()
-    # accumulate(g_ema, generator, 0)
 
-    e_ema = None
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,

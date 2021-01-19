@@ -132,7 +132,7 @@ class VideoFolderDataset(Dataset):
 
     def _get_video(self, index):
         video_len = self.lengths[index]
-        start_idx = random.randint(0, video_len-1-self.frame_num*self.frame_step)
+        start_idx = random.randint(0, video_len-self.frame_num*self.frame_step)
         frames = []
         for i in range(start_idx, start_idx+self.frame_num*self.frame_step, self.frame_step):
             img = Image.open(os.path.join(self.root, self.videos[index][i]))

@@ -87,7 +87,11 @@ class VideoFolderDataset(Dataset):
         
         if cache is not None and os.path.exists(cache):
             with open(cache, 'rb') as f:
-                self.videos, self.lengths = pickle.load(f)
+                cache_data = pickle.load(f)
+            assert(isinstance(cache_data, dict))
+            if not os.path.exists(dataroot) and 'root' in cache_data:
+                self.root = cache_data['root']
+            self.videos, self.lengths = cache_data['videos'], cache_data['lengths']
         else:
             video_list = []
             length_list = []
@@ -108,7 +112,9 @@ class VideoFolderDataset(Dataset):
             self.videos, self.lengths = video_list, length_list
             if cache is not None:
                 with open(cache, 'wb') as f:
-                    pickle.dump((self.videos, self.lengths), f)
+                    pickle.dump({'root': self.root,
+                                 'videos': self.videos,
+                                 'lengths': self.lengths}, f)
         self.cumsum = np.cumsum([0] + self.lengths)
         self.lengths1 = [i - 1 for i in self.lengths]
         self.cumsum1 = np.cumsum([0] + self.lengths1)
@@ -133,7 +139,7 @@ class VideoFolderDataset(Dataset):
             frames.append(F.to_tensor(img))
         frames = torch.stack(frames, 0)
         frames = self.transform(frames)
-        return frames
+        return {'frames': frames, 'path': self.videos[index]}
     
     def _get_image(self, index):
         # copied from MoCoGAN

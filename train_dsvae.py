@@ -139,7 +139,7 @@ def accumulate_batches(data_iter, num):
     return samples
 
 
-def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device):
+def train(args, loader, encoder, generator, discriminator, e_optim, d_optim, e_ema, device):
     loader = sample_data(loader)
 
     pbar = range(args.iter)
@@ -401,7 +401,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StyleGAN2 encoder trainer")
 
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
-    parser.add_argument("--dataset", type=str, default='multires')
     parser.add_argument("--cache", type=str, default='local.db')
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
@@ -649,29 +648,17 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
-    if args.dataset == 'multires':
-        transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = MultiResolutionDataset(args.path, transform, args.size)
-    elif args.dataset == 'videofolder':
-        # [Note] Potentially, same transforms will be applied to a batch of images,
-        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
-        transform = transforms.Compose(
-            [
-                # transforms.ToTensor(),  # this should be done in loader
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size),  # Image.LANCZOS
-                transforms.CenterCrop(args.size),
-                # transforms.ToTensor(),  # normally placed here
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
+    transform = transforms.Compose(
+        [
+            # transforms.ToTensor(),  # this should be done in loader
+            transforms.RandomHorizontalFlip(),
+            transforms.Resize(args.size),  # Image.LANCZOS
+            transforms.CenterCrop(args.size),
+            # transforms.ToTensor(),  # normally placed here
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+        ]
+    )
+    dataset = VideoFolderDataset(args.path, transform, mode='video', cache=args.cache)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

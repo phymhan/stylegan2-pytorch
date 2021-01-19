@@ -1,5 +1,7 @@
 import os
 import sys
+import math
+import torch
 
 
 def set_log_dir(args):
@@ -40,3 +42,35 @@ def print_args(parser, args):
         f.write(' python ')
         f.write(' '.join(sys.argv))
         f.write('\n')
+
+
+def estimate(netNetwork, tenFirst, tenSecond):
+    # Copied from https://github.com/sniklaus/pytorch-pwc/blob/master/run.py
+    # Assume tensors are normalized to [-1, 1]
+    tenFirst = (tenFirst + 1.) / 2
+    tenSecond = (tenSecond + 1.) / 2
+	assert(tenFirst.shape[1] == tenSecond.shape[1])
+	assert(tenFirst.shape[2] == tenSecond.shape[2])
+
+	intWidth = tenFirst.shape[2]
+	intHeight = tenFirst.shape[1]
+
+	# assert(intWidth == 1024) # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
+	# assert(intHeight == 436) # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
+
+	tenPreprocessedFirst = tenFirst.cuda().view(1, 3, intHeight, intWidth)
+	tenPreprocessedSecond = tenSecond.cuda().view(1, 3, intHeight, intWidth)
+
+	intPreprocessedWidth = min(int(math.floor(math.ceil(intWidth / 64.0) * 64.0)), 128)
+	intPreprocessedHeight = min(int(math.floor(math.ceil(intHeight / 64.0) * 64.0)), 128)
+
+	tenPreprocessedFirst = torch.nn.functional.interpolate(input=tenPreprocessedFirst, size=(intPreprocessedHeight, intPreprocessedWidth), mode='bilinear', align_corners=False)
+	tenPreprocessedSecond = torch.nn.functional.interpolate(input=tenPreprocessedSecond, size=(intPreprocessedHeight, intPreprocessedWidth), mode='bilinear', align_corners=False)
+
+	# tenFlow = 20.0 * torch.nn.functional.interpolate(input=netNetwork(tenPreprocessedFirst, tenPreprocessedSecond), size=(intHeight, intWidth), mode='bilinear', align_corners=False)
+    tenFlow = 20.0 * netNetwork(tenPreprocessedFirst, tenPreprocessedSecond)
+
+	tenFlow[:, 0, :, :] *= float(intWidth) / float(intPreprocessedWidth)
+	tenFlow[:, 1, :, :] *= float(intHeight) / float(intPreprocessedHeight)
+
+	return tenFlow[0, :, :, :]

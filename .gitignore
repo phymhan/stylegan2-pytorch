@@ -138,3 +138,5 @@ samples*
 logs*
 *.back
 *.bak
+
+*.pth

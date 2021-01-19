@@ -112,8 +112,7 @@ def run(args, loader, encoder, generator, device):
         else:
             latent_seq = encoder(real_seq)  # shape [T, n_latent, 512]
         latent_npy = latent_seq.detach().cpu().numpy()
-        
-        np.save(os.path.join(args.output_dir, f"{data['path']}.npy"), latent_npy)
+        np.save(os.path.join(args.output_dir, f"{data['path'][0]}.npy"), latent_npy)
 
 
 if __name__ == "__main__":

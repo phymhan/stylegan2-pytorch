@@ -106,7 +106,7 @@ def run(args, loader, encoder, generator, device):
         real_seq = real_seq.squeeze().to(device)  # shape [T, 3, H, W]
         T = real_seq.shape[0]
         if T % args.stddev_group != 0:
-            real_seq = adjust_batch(real_seq, args.stddve_group)
+            real_seq = adjust_batch(real_seq, args.stddev_group)
             latent_seq = encoder(real_seq)  # shape [N, n_latent, 512]
             latent_seq = latent_seq[:T, ...]
         else:

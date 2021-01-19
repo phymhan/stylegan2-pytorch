@@ -133,6 +133,9 @@ if __name__ == "__main__":
     parser.add_argument("--frame_step", type=int, default=1)
     parser.add_argument("--stddev_group", type=int, default=4)
     parser.add_argument(
+        "--batch", type=int, default=16, help="batch sizes for each gpus"
+    )
+    parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
     parser.add_argument(

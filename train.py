@@ -318,6 +318,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "d_optim": d_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
+                        "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
                 )

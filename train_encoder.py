@@ -390,6 +390,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
                         "d_optim": d_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
+                        "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"latest.pt"),
                 )

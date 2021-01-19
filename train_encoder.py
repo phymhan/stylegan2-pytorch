@@ -674,6 +674,8 @@ if __name__ == "__main__":
             ]
         )
         dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
+        if len(dataset) == 0:
+            raise ValueError
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

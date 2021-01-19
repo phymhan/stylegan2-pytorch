@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from torch.utils import data
 import torch.distributed as dist
 from torchvision import transforms, utils
+from torchvision.io import write_video
 from PIL import Image
 from tqdm import tqdm
 import util
@@ -87,6 +88,23 @@ def adjust_batch(data, group=1):
     return data.repeat(*repeat_dims)
 
 
+def encode(encoder, seq, args):
+    # seq is of shape [T, C, H, W]
+    T = seq.shape[0]
+    if T % args.stddev_group != 0:
+        seq = adjust_batch(seq, args.stddev_group)
+        latent = encoder(seq)  # shape [N, n_latent, 512]
+        latent = latent[:T, ...]
+    else:
+        latent = encoder(seq)  # shape [T, n_latent, 512]
+    return latent
+
+
+def save_video(seq, path):
+    video = ((video+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
+    write_video(path, video, fps=15)
+
+
 @torch.no_grad()
 def run(args, loader, encoder, generator, device):
     if args.distributed:
@@ -100,20 +118,46 @@ def run(args, loader, encoder, generator, device):
     requires_grad(generator, False)
     encoder.eval()
     generator.eval()
+    counter = 0
 
     for data in tqdm(loader):
+        counter += 1
         real_seq = data['frames']
-        real_seq = real_seq.squeeze().to(device)  # shape [T, 3, H, W]
-        T = real_seq.shape[0]
-        if T % args.stddev_group != 0:
-            real_seq = adjust_batch(real_seq, args.stddev_group)
-            latent_seq = encoder(real_seq)  # shape [N, n_latent, 512]
-            latent_seq = latent_seq[:T, ...]
-        else:
-            latent_seq = encoder(real_seq)  # shape [T, n_latent, 512]
-        latent_npy = latent_seq.detach().cpu().numpy()
-        np.save(os.path.join(args.output_dir, f"{data['path'][0]}.npy"), latent_npy)
-        del latent_npy, latent_seq, real_seq
+        real_seq = real_seq.to(device)  # shape [2, T, 3, H, W]
+        seqA, seqB = real_seq[0, ...], real_seq[1, ...]
+        latA = encode(encoder, seqA, args)
+        latB = encode(encoder, seqB, args)
+        coA, moA = latA[0, ...], latA[1:, ...] - latA[0, ...]
+        coB, moB = latB[0, ...], latB[1:, ...] - latB[0, ...]
+
+        # recon
+        recA, _ = generator([coA + moA], input_is_latent=True, return_latents=False)
+        recB, _ = generator([coB + moB], input_is_latent=True, return_latents=False)
+
+        # swap
+        coAmoB, _ = generator([coA + moB], input_is_latent=True, return_latents=False)
+        coBmoA, _ = generator([coB + moA], input_is_latent=True, return_latents=False)
+
+        # orig
+        oriA = seqA[1:, ...]
+        oriB = seqB[1:, ...]
+
+        # save images and videos
+        T = seqA.shape[0]
+        utils.save_image(oriA, os.path.join(args.output_dir, f'{counter:03d}-img_origA.png'), nrow=T-1, normalize=True, range=[-1, 1])
+        utils.save_image(oriB, os.path.join(args.output_dir, f'{counter:03d}-img_origB.png'), nrow=T-1, normalize=True, range=[-1, 1])
+        utils.save_image(recA, os.path.join(args.output_dir, f'{counter:03d}-img_reconA.png'), nrow=T-1, normalize=True, range=[-1, 1])
+        utils.save_image(recB, os.path.join(args.output_dir, f'{counter:03d}-img_reconB.png'), nrow=T-1, normalize=True, range=[-1, 1])
+        utils.save_image(coAmoB, os.path.join(args.output_dir, f'{counter:03d}-img_coA+moB.png'), nrow=T-1, normalize=True, range=[-1, 1])
+        utils.save_image(coBmoA, os.path.join(args.output_dir, f'{counter:03d}-img_coB+moA.png'), nrow=T-1, normalize=True, range=[-1, 1])
+        save_video(oriA, os.path.join(args.output_dir, f'{counter:03d}-vid_origA.mp4'))
+        save_video(oriB, os.path.join(args.output_dir, f'{counter:03d}-vid_origB.mp4'))
+        save_video(recA, os.path.join(args.output_dir, f'{counter:03d}-vid_reconA.mp4'))
+        save_video(recB, os.path.join(args.output_dir, f'{counter:03d}-vid_reconB.mp4'))
+        save_video(coAmoB, os.path.join(args.output_dir, f'{counter:03d}-vid_coA+moB.mp4'))
+        save_video(coBmoA, os.path.join(args.output_dir, f'{counter:03d}-vid_coB+moA.mp4'))
+        if counter >= args.n_sample:
+            break
 
 
 if __name__ == "__main__":
@@ -124,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
     parser.add_argument("--cache", type=str, default='local.db')
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
-    parser.add_argument("--output_dir", type=str, default='samples/latents')
+    parser.add_argument("--output_dir", type=str, default='samples/style_transfer')
     parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
     parser.add_argument("--train_on_fake", action='store_true', help="train encoder on fake?")
     parser.add_argument("--which_encoder", type=str, default='style')
@@ -228,7 +272,7 @@ if __name__ == "__main__":
         raise ValueError
     loader = data.DataLoader(
         dataset,
-        batch_size=1,
+        batch_size=2,
         sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
         drop_last=True,
     )

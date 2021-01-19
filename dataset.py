@@ -139,7 +139,7 @@ class VideoFolderDataset(Dataset):
             frames.append(F.to_tensor(img))
         frames = torch.stack(frames, 0)
         frames = self.transform(frames)
-        return {'frames': frames, 'path': self.videos[index]}
+        return {'frames': frames, 'path': os.path.basename(os.path.dirname(self.videos[index][0]))}
     
     def _get_image(self, index):
         # copied from MoCoGAN

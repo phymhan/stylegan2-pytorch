@@ -156,12 +156,10 @@ def run(args, loader, encoder, generator, device):
     for data in tqdm(loader):
         real_seq = data['frames']
         real_seq = real_seq.to(device)  # shape [1, T, 3, H, W]
-        name_seq = os.path.basename(data['path'])
-        st()
         latent_seq = encoder(real_seq.squeeze())  # shape [T, n_latent, 512]
         latent_npy = latent_seq.detach().cpu().numpy()
         
-        np.save(os.path.join(args.output_dir, f'{name_seq}.npy'), latent_npy)
+        np.save(os.path.join(args.output_dir, f"{data['path']}.npy"), latent_npy)
 
 
 if __name__ == "__main__":

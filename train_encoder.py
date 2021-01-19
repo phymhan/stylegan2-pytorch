@@ -425,6 +425,7 @@ if __name__ == "__main__":
     parser.add_argument("--vgg_ckpt", type=str, default="pretrained/vgg16.pth")
     parser.add_argument("--which_encoder", type=str, default='style')
     parser.add_argument("--which_latent", type=str, default='w_shared')
+    parser.add_argument("--stddev_group", type=int, default=4)
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -584,10 +585,10 @@ if __name__ == "__main__":
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True).to(device)
+            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
         if not args.no_ema:
             e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-                which_latent=args.which_latent, reshape_latent=True).to(device)
+                which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
     if not args.no_ema:
         e_ema.eval()
         accumulate(e_ema, encoder, 0)

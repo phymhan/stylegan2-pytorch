@@ -9,7 +9,8 @@ from torch.nn import functional as F
 from torch.autograd import Function
 
 from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
-
+import pdb
+st = pdb.set_trace
 
 class PixelNorm(nn.Module):
     def __init__(self):
@@ -669,6 +670,8 @@ class Encoder(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         which_latent='w',
         reshape_latent=True,
+        stddev_group=4,
+        stddev_feat=1,
     ):
         """
         which_latent: 'w' predict different w for all blocks; 'w_shared' predict
@@ -709,10 +712,10 @@ class Encoder(nn.Module):
 
         self.convs = nn.Sequential(*convs)
 
-        self.stddev_group = 4
-        self.stddev_feat = 1
+        self.stddev_group = stddev_group
+        self.stddev_feat = stddev_feat
 
-        self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)
+        self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
         if self.which_latent == 'w':
             out_channel = style_dim * self.n_latent
         elif self.which_latent == 'w_shared':
@@ -726,16 +729,17 @@ class Encoder(nn.Module):
 
     def forward(self, input):
         out = self.convs(input)
-
-        batch, channel, height, width = out.shape
-        group = min(batch, self.stddev_group)
-        stddev = out.view(
-            group, -1, self.stddev_feat, channel // self.stddev_feat, height, width
-        )
-        stddev = torch.sqrt(stddev.var(0, unbiased=False) + 1e-8)
-        stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
-        stddev = stddev.repeat(group, 1, height, width)
-        out = torch.cat([out, stddev], 1)
+        
+        if self.stddev_group > 1:
+            batch, channel, height, width = out.shape
+            group = min(batch, self.stddev_group)
+            stddev = out.view(
+                group, -1, self.stddev_feat, channel // self.stddev_feat, height, width
+            )
+            stddev = torch.sqrt(stddev.var(0, unbiased=False) + 1e-8)
+            stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
+            stddev = stddev.repeat(group, 1, height, width)
+            out = torch.cat([out, stddev], 1)
 
         out = self.final_conv(out)
 

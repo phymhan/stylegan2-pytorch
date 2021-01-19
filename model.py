@@ -729,6 +729,7 @@ class Encoder(nn.Module):
 
     def forward(self, input):
         out = self.convs(input)
+        batch = out.shape[0]
         
         if self.stddev_group > 1:
             batch, channel, height, width = out.shape

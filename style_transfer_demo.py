@@ -101,7 +101,7 @@ def encode(encoder, seq, args):
 
 
 def save_video(seq, path):
-    video = ((seq.data+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
+    video = ((seq.data.cpu()+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
     write_video(path, video, fps=15)
 
 

@@ -157,7 +157,7 @@ def run(args, loader, encoder, generator, device):
         real_seq = data['frames']
         real_seq = real_seq.to(device)  # shape [1, T, 3, H, W]
         name_seq = os.path.basename(data['path'])
-
+        st()
         latent_seq = encoder(real_seq.squeeze())  # shape [T, n_latent, 512]
         latent_npy = latent_seq.detach().cpu().numpy()
         
@@ -233,9 +233,8 @@ if __name__ == "__main__":
     args.n_mlp = 8
 
     args.start_iter = 0
-    # args.mixing = 0  # no mixing
-    util.set_log_dir(args)
-    util.print_args(parser, args)
+    # util.set_log_dir(args)
+    # util.print_args(parser, args)
     
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier

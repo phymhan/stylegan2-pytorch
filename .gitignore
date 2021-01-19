@@ -135,6 +135,7 @@ wandb/
 data
 checkpoints*
 samples*
+latents*
 logs*
 *.back
 *.bak

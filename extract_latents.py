@@ -51,74 +51,11 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
-def accumulate(model1, model2, decay=0.999):
-    par1 = dict(model1.named_parameters())
-    par2 = dict(model2.named_parameters())
-
-    for k in par1.keys():
-        par1[k].data.mul_(decay).add_(par2[k].data, alpha=1 - decay)
-
-
 def sample_data(loader):
     # Endless iterator
     while True:
         for batch in loader:
             yield batch
-
-
-def d_logistic_loss(real_pred, fake_pred):
-    real_loss = F.softplus(-real_pred)
-    fake_loss = F.softplus(fake_pred)
-
-    return real_loss.mean() + fake_loss.mean()
-
-
-def d_r1_loss(real_pred, real_img):
-    grad_real, = autograd.grad(
-        outputs=real_pred.sum(), inputs=real_img, create_graph=True
-    )
-    grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
-
-    return grad_penalty
-
-
-def g_nonsaturating_loss(fake_pred):
-    loss = F.softplus(-fake_pred).mean()
-
-    return loss
-
-
-def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
-    noise = torch.randn_like(fake_img) / math.sqrt(
-        fake_img.shape[2] * fake_img.shape[3]
-    )
-    grad, = autograd.grad(
-        outputs=(fake_img * noise).sum(), inputs=latents, create_graph=True
-    )
-    path_lengths = torch.sqrt(grad.pow(2).sum(2).mean(1))
-
-    path_mean = mean_path_length + decay * (path_lengths.mean() - mean_path_length)
-
-    path_penalty = (path_lengths - path_mean).pow(2).mean()
-
-    return path_penalty, path_mean.detach(), path_lengths
-
-
-def make_noise(batch, latent_dim, n_noise, device):
-    if n_noise == 1:
-        return torch.randn(batch, latent_dim, device=device)
-
-    noises = torch.randn(n_noise, batch, latent_dim, device=device).unbind(0)
-
-    return noises
-
-
-def mixing_noise(batch, latent_dim, prob, device):
-    if prob > 0 and random.random() < prob:
-        return make_noise(batch, latent_dim, 2, device)
-
-    else:
-        return [make_noise(batch, latent_dim, 1, device)]
 
 
 def set_grad_none(model, targets):
@@ -139,6 +76,17 @@ def accumulate_batches(data_iter, num):
     return samples
 
 
+def adjust_batch(data, group=1):
+    # Adjust batch size to multiple of group
+    # data is of shape [N, C, H, W]
+    batch = data.shape[0]
+    if batch % group == 0:
+        return data
+    batch_new = int(math.ceil(batch / group * 1.0) * group)
+    repeat_dims = [int(math.ceil(batch_new / batch * 1.0))] + [1] * (data.ndim - 1)
+    return data.repeat(*repeat_dims)
+
+
 @torch.no_grad()
 def run(args, loader, encoder, generator, device):
     if args.distributed:
@@ -155,8 +103,14 @@ def run(args, loader, encoder, generator, device):
 
     for data in tqdm(loader):
         real_seq = data['frames']
-        real_seq = real_seq.to(device)  # shape [1, T, 3, H, W]
-        latent_seq = encoder(real_seq.squeeze())  # shape [T, n_latent, 512]
+        real_seq = real_seq.squeeze().to(device)  # shape [T, 3, H, W]
+        T = real_seq.shape[0]
+        if T % args.stddev_group != 0:
+            real_seq = adjust_batch(real_seq, args.stddve_group)
+            latent_seq = encoder(real_seq)  # shape [N, n_latent, 512]
+            latent_seq = latent_seq[:T, ...]
+        else:
+            latent_seq = encoder(real_seq)  # shape [T, n_latent, 512]
         latent_npy = latent_seq.detach().cpu().numpy()
         
         np.save(os.path.join(args.output_dir, f"{data['path']}.npy"), latent_npy)
@@ -177,6 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("--which_latent", type=str, default='w_shared')
     parser.add_argument("--frame_num", type=int, default=50)
     parser.add_argument("--frame_step", type=int, default=1)
+    parser.add_argument("--stddev_group", type=int, default=4)
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -247,7 +202,7 @@ if __name__ == "__main__":
     else:
         from model import Encoder
         e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True).to(device)
+            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
     e_ema.eval()
 
     if args.ckpt is not None:
@@ -274,4 +229,5 @@ if __name__ == "__main__":
     )
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
+    args.stddev_group = min(args.stddev_group, args.batch)
     run(args, loader, e_ema, g_ema, device)

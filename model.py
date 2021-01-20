@@ -601,7 +601,7 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], in_channel=3):
         super().__init__()
 
         channels = {
@@ -730,7 +730,7 @@ class Encoder(nn.Module):
     def forward(self, input):
         out = self.convs(input)
         batch = out.shape[0]
-        
+
         if self.stddev_group > 1:
             batch, channel, height, width = out.shape
             group = min(batch, self.stddev_group)

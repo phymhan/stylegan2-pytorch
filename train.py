@@ -445,6 +445,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    util.seed_everything()
 
     n_gpu = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = n_gpu > 1

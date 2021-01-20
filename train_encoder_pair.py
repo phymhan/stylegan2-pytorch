@@ -190,32 +190,42 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             print("Done!")
             break
 
-        real_img = next(loader)
-        real_img = real_img.to(device)
+        real_img1, real_img2 = next(loader)
+        real_img1 = real_img1.to(device)
+        real_img2 = real_img2.to(device)
 
         # Train Encoder
         if args.toggle_grads:
             requires_grad(encoder, True)
             requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
-        latent_real = encoder(real_img)
-        fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+        latent_real1 = encoder(real_img1)
+        fake_img1, _ = generator([latent_real1], input_is_latent=True, return_latents=False)
+        latent_real2 = encoder(real_img2)
+        fake_img2, _ = generator([latent_real2], input_is_latent=True, return_latents=False)
 
         if args.lambda_adv > 0:
-            if args.augment:
-                fake_img_aug, _ = augment(fake_img, ada_aug_p)
-            else:
-                fake_img_aug = fake_img
-            fake_pred = discriminator(fake_img_aug)
+            # if args.augment:
+            #     fake_img_aug1, _ = augment(fake_img1, ada_aug_p)
+            # else:
+            #     fake_img_aug1 = fake_img1
+            fake_img_pair = torch.cat((fake_img1, fake_img2), 1)
+            fake_pred = discriminator(fake_img_pair)
             adv_loss = g_nonsaturating_loss(fake_pred)
 
         if args.lambda_pix > 0:
-            pix_loss = torch.mean((real_img - fake_img) ** 2)
+            pix_loss = torch.mean((real_img1 - fake_img1) ** 2)
+            if args.reconstruct_pair:
+                pix_loss += torch.mean((real_img2 - fake_img2) ** 2)
 
         if args.lambda_vgg > 0:
-            real_feat = vggnet(real_img)
-            fake_feat = vggnet(fake_img)
+            real_feat = vggnet(real_img1)
+            fake_feat = vggnet(fake_img1)
             vgg_loss = torch.mean((real_feat - fake_feat) ** 2)
+            if args.reconstruct_pair:
+                real_feat = vggnet(real_img2)
+                fake_feat = vggnet(fake_img2)
+                vgg_loss += torch.mean((real_feat - fake_feat) ** 2)
 
         e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
 
@@ -228,26 +238,26 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
         e_loss.backward()
         e_optim.step()
 
-        if args.train_on_fake:
-            e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
-            if e_regularize and args.lambda_rec > 0:
-                noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                fake_img, latent_fake = generator(noise, input_is_latent=False, return_latents=True)
-                latent_pred = encoder(fake_img)
-                if latent_pred.ndim < 3:
-                    latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
-                rec_loss = torch.mean((latent_fake - latent_pred) ** 2)
-                encoder.zero_grad()
-                (rec_loss * args.lambda_rec).backward()
-                e_optim.step()
-                loss_dict["rec"] = rec_loss
+        # if args.train_on_fake:
+        #     e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
+        #     if e_regularize and args.lambda_rec > 0:
+        #         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        #         fake_img, latent_fake = generator(noise, input_is_latent=False, return_latents=True)
+        #         latent_pred = encoder(fake_img)
+        #         if latent_pred.ndim < 3:
+        #             latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
+        #         rec_loss = torch.mean((latent_fake - latent_pred) ** 2)
+        #         encoder.zero_grad()
+        #         (rec_loss * args.lambda_rec).backward()
+        #         e_optim.step()
+        #         loss_dict["rec"] = rec_loss
 
         e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
         if e_regularize:
             # why not regularize on augmented real?
-            real_img.requires_grad = True
-            real_pred = encoder(real_img)
-            r1_loss_e = d_r1_loss(real_pred, real_img)
+            real_img1.requires_grad = True
+            real_pred = encoder(real_img1)
+            r1_loss_e = d_r1_loss(real_pred, real_img1)
 
             encoder.zero_grad()
             (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
@@ -263,18 +273,23 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             requires_grad(encoder, False)
             requires_grad(discriminator, True)
         if not args.no_update_discriminator and args.lambda_adv > 0:
-            latent_real = encoder(real_img)
-            fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+            latent_real1 = encoder(real_img1)
+            fake_img1, _ = generator([latent_real1], input_is_latent=True, return_latents=False)
+            latent_real2 = encoder(real_img2)
+            fake_img2, _ = generator([latent_real2], input_is_latent=True, return_latents=False)
 
-            if args.augment:
-                real_img_aug, _ = augment(real_img, ada_aug_p)
-                fake_img_aug, _ = augment(fake_img, ada_aug_p)
-            else:
-                real_img_aug = real_img
-                fake_img_aug = fake_img
+            # if args.augment:
+            #     real_img_aug, _ = augment(real_img, ada_aug_p)
+            #     fake_img_aug, _ = augment(fake_img, ada_aug_p)
+            # else:
+            #     real_img_aug = real_img
+            #     fake_img_aug = fake_img
             
-            fake_pred = discriminator(fake_img_aug)
-            real_pred = discriminator(real_img_aug)
+            fake_img_pair = torch.cat((fake_img1, fake_img2), 1)
+            real_img_pair = torch.cat((real_img1, real_img2), 1)
+
+            fake_pred = discriminator(fake_img_pair)
+            real_pred = discriminator(real_img_pair)
             d_loss = d_logistic_loss(real_pred, fake_pred)
 
             loss_dict["d"] = d_loss
@@ -285,16 +300,16 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             d_loss.backward()
             d_optim.step()
 
-            if args.augment and args.augment_p == 0:
-                ada_aug_p = ada_augment.tune(real_pred)
-                r_t_stat = ada_augment.r_t_stat
+            # if args.augment and args.augment_p == 0:
+            #     ada_aug_p = ada_augment.tune(real_pred)
+            #     r_t_stat = ada_augment.r_t_stat
             
             d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
                 # why not regularize on augmented real?
-                real_img.requires_grad = True
-                real_pred = discriminator(real_img)
-                r1_loss_d = d_r1_loss(real_pred, real_img)
+                real_img1.requires_grad = True
+                real_pred = discriminator(real_img1)
+                r1_loss_d = d_r1_loss(real_pred, real_img1)
 
                 discriminator.zero_grad()
                 (args.r1 / 2 * r1_loss_d * args.d_reg_every + 0 * real_pred.view(-1)[0]).backward()
@@ -427,6 +442,7 @@ if __name__ == "__main__":
     parser.add_argument("--which_encoder", type=str, default='style')
     parser.add_argument("--which_latent", type=str, default='w_shared')
     parser.add_argument("--stddev_group", type=int, default=4)
+    parser.add_argument("--reconstruct_pair", action='store_true')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -563,7 +579,7 @@ if __name__ == "__main__":
         pwcnet.eval()
 
     discriminator = Discriminator(
-        args.size, channel_multiplier=args.channel_multiplier
+        args.size, channel_multiplier=args.channel_multiplier, in_channel=6,
     ).to(device)
     # generator = Generator(
     #     args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
@@ -621,9 +637,9 @@ if __name__ == "__main__":
         else:
             g_ema.load_state_dict(ckpt["g"])
         
-        if not args.no_load_discriminator:
-            discriminator.load_state_dict(ckpt["d"])
-            d_optim.load_state_dict(ckpt["d_optim"])
+        # if not args.no_load_discriminator:
+        #     discriminator.load_state_dict(ckpt["d"])
+        #     d_optim.load_state_dict(ckpt["d_optim"])
 
         if args.resume:
             try:
@@ -652,31 +668,22 @@ if __name__ == "__main__":
             broadcast_buffers=False,
         )
 
-    if args.dataset == 'multires':
-        transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = MultiResolutionDataset(args.path, transform, args.size)
-    elif args.dataset == 'videofolder':
-        # [Note] Potentially, same transforms will be applied to a batch of images,
-        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
-        transform = transforms.Compose(
-            [
-                # transforms.ToTensor(),  # this should be done in loader
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size),  # Image.LANCZOS
-                transforms.CenterCrop(args.size),
-                # transforms.ToTensor(),  # normally placed here
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
-        if len(dataset) == 0:
-            raise ValueError
+    assert(args.dataset == 'videofolder')
+    # [Note] Potentially, same transforms will be applied to a batch of images,
+    # either a sequence or a pair (optical flow), so we should apply ToTensor first.
+    transform = transforms.Compose(
+        [
+            # transforms.ToTensor(),  # this should be done in loader
+            transforms.RandomHorizontalFlip(),
+            transforms.Resize(args.size),  # Image.LANCZOS
+            transforms.CenterCrop(args.size),
+            # transforms.ToTensor(),  # normally placed here
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+        ]
+    )
+    dataset = VideoFolderDataset(args.path, transform, mode='pair', cache=args.cache)
+    if len(dataset) == 0:
+        raise ValueError
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
@@ -686,5 +693,5 @@ if __name__ == "__main__":
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
-
+    assert(not args.augment)  # currently only supports no augment
     train(args, loader, encoder, g_ema, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device)

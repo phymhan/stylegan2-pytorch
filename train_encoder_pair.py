@@ -130,7 +130,7 @@ def set_grad_none(model, targets):
 def accumulate_batches(data_iter, num):
     samples = []
     while num > 0:
-        data = next(data_iter)
+        data, _ = next(data_iter)
         samples.append(data)
         num -= data.size(0)
     samples = torch.cat(samples, dim=0)

@@ -74,7 +74,7 @@ class VideoFolderDataset(Dataset):
         frame_step=1,
         cache=None,
     ):
-        assert(mode in ['video', 'image', 'pair'])
+        assert(mode in ['video', 'image', 'pair', 'triplet'])
         self.mode = mode
         self.root = dataroot
         self.cache = cache
@@ -118,17 +118,18 @@ class VideoFolderDataset(Dataset):
         self.cumsum = np.cumsum([0] + self.lengths)
         self.lengths1 = [i - 1 for i in self.lengths]
         self.cumsum1 = np.cumsum([0] + self.lengths1)
+        self.lengths2 = [i - 2 for i in self.lengths]
+        self.cumsum2 = np.cumsum([0] + self.lengths2)
         print("Total numver of videos {}.".format(len(self.videos)))
         print("Total number of frames {}.".format(np.sum(self.lengths)))
         if self.mode == 'video':
-            # self.__getitem__ = self._get_video
             self._dataset_length = len(self.videos)
         elif self.mode == 'image':
-            # self.__getitem__ = self._get_image
             self._dataset_length = np.sum(self.lengths)
-        else:  # self.mode == 'pair'
-            # self.__getitem__ = self._get_pair
+        elif self.mode == 'pair':
             self._dataset_length = np.sum(self.lengths1)
+        else:  # self.mode == 'triplet'
+            self._dataset_length = np.sum(self.lengths2)
 
     def _get_video(self, index):
         video_len = self.lengths[index]
@@ -170,13 +171,32 @@ class VideoFolderDataset(Dataset):
         frames = self.transform(frames)
         return frames.unbind(0)
     
+    def _get_triplet(self, index):
+        if index == 0:
+            video_id = 0
+            frame_id = 0
+        else:
+            video_id = np.searchsorted(self.cumsum2, index) - 1
+            frame_id = index - self.cumsum2[video_id] - 1
+        frame1 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id]))
+        frame1 = F.to_tensor(frame1)
+        frame2 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id + 1]))
+        frame2 = F.to_tensor(frame2)
+        frame3 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id + 2]))
+        frame3 = F.to_tensor(frame3)
+        frames = torch.stack([frame1, frame2, frame3], 0)
+        frames = self.transform(frames)
+        return frames.unbind(0)
+    
     def __getitem__(self, index):
         if self.mode == 'video':
             return self._get_video(index)
         elif self.mode == 'image':
             return self._get_image(index)
-        else:  # self.mode == 'pair'
+        elif self.mode == 'pair':
             return self._get_pair(index)
+        else:  # mode == 'triplet'
+            return self._get_triplet(index)
 
     def __len__(self):
         return self._dataset_length

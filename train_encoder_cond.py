@@ -211,7 +211,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             #     fake_img_aug1, _ = augment(fake_img1, ada_aug_p)
             # else:
             #     fake_img_aug1 = fake_img1
-            fake_img_pair = torch.cat((fake_img1, real_img2), 1)
+            if args.use_residual:
+                fake_img_pair = fake_img1 - real_img2
+            else:
+                fake_img_pair = torch.cat((fake_img1, real_img2), 1)
             fake_pred = discriminator(fake_img_pair)
             adv_loss = g_nonsaturating_loss(fake_pred)
 
@@ -280,8 +283,12 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             #     real_img_aug = real_img
             #     fake_img_aug = fake_img
             
-            fake_img_pair = torch.cat((fake_img1, real_img2), 1)
-            real_img_pair = torch.cat((real_img1, real_img2), 1)
+            if args.use_residual:
+                fake_img_pair = fake_img1 - real_img2
+                real_img_pair = real_img1 - real_img2
+            else:
+                fake_img_pair = torch.cat((fake_img1, real_img2), 1)
+                real_img_pair = torch.cat((real_img1, real_img2), 1)
 
             fake_pred = discriminator(fake_img_pair)
             real_pred = discriminator(real_img_pair)
@@ -302,7 +309,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
                 # why not regularize on augmented real?
-                real_img_pair = torch.cat((real_img1, real_img2), 1)
+                if args.use_residual:
+                    real_img_pair = real_img1 - real_img2
+                else:
+                    real_img_pair = torch.cat((real_img1, real_img2), 1)
                 real_img_pair.requires_grad = True
                 real_pred = discriminator(real_img_pair)
                 r1_loss_d = d_r1_loss(real_pred, real_img_pair)
@@ -449,6 +459,7 @@ if __name__ == "__main__":
     parser.add_argument("--which_encoder", type=str, default='style')
     parser.add_argument("--which_latent", type=str, default='w_shared')
     parser.add_argument("--stddev_group", type=int, default=4)
+    parser.add_argument("--use_residual", action='store_true')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -585,7 +596,8 @@ if __name__ == "__main__":
         pwcnet.eval()
 
     discriminator = Discriminator(
-        args.size, channel_multiplier=args.channel_multiplier, in_channel=6,
+        args.size, channel_multiplier=args.channel_multiplier,
+        in_channel=3 if args.use_residual else 6,
     ).to(device)
     # generator = Generator(
     #     args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier

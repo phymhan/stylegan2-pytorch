@@ -317,6 +317,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
         rec_loss_val = loss_reduced["rec"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
+        avg_pix_loss.update(pix_loss_val, real_img1.shape[0])
+        avg_vgg_loss.update(vgg_loss_val, real_img1.shape[0])
 
         if get_rank() == 0:
             pbar.set_description(

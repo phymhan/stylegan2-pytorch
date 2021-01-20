@@ -207,15 +207,15 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
         fake_img2, _ = generator([latent_real2], input_is_latent=True, return_latents=False)
 
         if args.lambda_adv > 0:
-            # if args.augment:
-            #     fake_img_aug1, _ = augment(fake_img1, ada_aug_p)
-            # else:
-            #     fake_img_aug1 = fake_img1
             if args.use_residual:
                 fake_img_pair = fake_img1 - real_img2
             else:
                 fake_img_pair = torch.cat((fake_img1, real_img2), 1)
-            fake_pred = discriminator(fake_img_pair)
+            if args.augment:
+                fake_img_aug, _ = augment(fake_img_pair, ada_aug_p)
+            else:
+                fake_img_aug = fake_img_pair
+            fake_pred = discriminator(fake_img_aug)
             adv_loss = g_nonsaturating_loss(fake_pred)
 
         if args.lambda_pix > 0:
@@ -276,13 +276,6 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             latent_real1 = encoder(real_img1)
             fake_img1, _ = generator([latent_real1], input_is_latent=True, return_latents=False)
 
-            # if args.augment:
-            #     real_img_aug, _ = augment(real_img, ada_aug_p)
-            #     fake_img_aug, _ = augment(fake_img, ada_aug_p)
-            # else:
-            #     real_img_aug = real_img
-            #     fake_img_aug = fake_img
-            
             if args.use_residual:
                 fake_img_pair = fake_img1 - real_img2
                 real_img_pair = real_img1 - real_img2
@@ -290,8 +283,15 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
                 fake_img_pair = torch.cat((fake_img1, real_img2), 1)
                 real_img_pair = torch.cat((real_img1, real_img2), 1)
 
-            fake_pred = discriminator(fake_img_pair)
-            real_pred = discriminator(real_img_pair)
+            if args.augment:
+                real_img_aug, _ = augment(real_img_pair, ada_aug_p)
+                fake_img_aug, _ = augment(fake_img_pair, ada_aug_p)
+            else:
+                real_img_aug = real_img_pair
+                fake_img_aug = fake_img_pair
+
+            fake_pred = discriminator(fake_img_aug)
+            real_pred = discriminator(real_img_aug)
             d_loss = d_logistic_loss(real_pred, fake_pred)
 
             loss_dict["d"] = d_loss
@@ -302,9 +302,9 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             d_loss.backward()
             d_optim.step()
 
-            # if args.augment and args.augment_p == 0:
-            #     ada_aug_p = ada_augment.tune(real_pred)
-            #     r_t_stat = ada_augment.r_t_stat
+            if args.augment and args.augment_p == 0:
+                ada_aug_p = ada_augment.tune(real_pred)
+                r_t_stat = ada_augment.r_t_stat
             
             d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
@@ -711,5 +711,5 @@ if __name__ == "__main__":
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
-    assert(not args.augment)  # currently only supports no augment
+    assert(not args.augment or args.use_residual)  # currently only supports no augment
     train(args, loader, encoder, g_ema, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device)

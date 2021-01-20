@@ -257,9 +257,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
         e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
         if e_regularize:
             # why not regularize on augmented real?
-            real_img1.requires_grad = True
-            real_pred = encoder(real_img1)
-            r1_loss_e = d_r1_loss(real_pred, real_img1)
+            real_img_pair = torch.cat((real_img1, real_img2), 1)
+            real_img_pair.requires_grad = True
+            real_pred = encoder(real_img_pair)
+            r1_loss_e = d_r1_loss(real_pred, real_img_pair)
 
             encoder.zero_grad()
             (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
@@ -309,9 +310,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
                 # why not regularize on augmented real?
-                real_img1.requires_grad = True
-                real_pred = discriminator(real_img1)
-                r1_loss_d = d_r1_loss(real_pred, real_img1)
+                real_img_pair = torch.cat((real_img1, real_img2), 1)
+                real_img_pair.requires_grad = True
+                real_pred = discriminator(real_img_pair)
+                r1_loss_d = d_r1_loss(real_pred, real_img_pair)
 
                 discriminator.zero_grad()
                 (args.r1 / 2 * r1_loss_d * args.d_reg_every + 0 * real_pred.view(-1)[0]).backward()

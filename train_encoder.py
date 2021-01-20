@@ -328,9 +328,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             )
 
             if i % args.log_every == 0:
-                latent_x = e_ema(sample_x)
-                fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
-                sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
+                with torch.no_grad():
+                    latent_x = e_ema(sample_x)
+                    fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
+                    sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
                             f"ref: {sample_pix_loss.item()};\n")

@@ -7,7 +7,7 @@ import cv2
 import random
 import pickle
 
-_IMGEXT = 'jpg'
+_IMGEXT = 'png'
 
 def get_frames(vidpath, image_size=0, every_nth=1, trim_len=float('Inf')):
     # get frames as list of images, return a list of list

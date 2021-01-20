@@ -158,6 +158,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
                  "r1_d": torch.tensor(0., device=device),
                  "r1_e": torch.tensor(0., device=device),
                  "rec": torch.tensor(0., device=device),}
+    avg_pix_loss = util.AverageMeter()
+    avg_vgg_loss = util.AverageMeter()
 
     if args.distributed:
         e_module = encoder.module
@@ -324,6 +326,14 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
                     f"rec: {rec_loss_val:.4f}; augment: {ada_aug_p:.4f}"
                 )
             )
+
+            if i % args.log_every == 0:
+                latent_x = e_ema(sample_x)
+                fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
+                sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
+                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                    f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
+                            f"ref: {sample_pix_loss.item()};\n")
 
             if wandb and args.wandb:
                 wandb.log(

@@ -3,7 +3,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from collections import OrderedDict
 import numpy as np
-# from models.stylegan_layers import PixelNormLayer, EqualizedLinear
+from models.stylegan_layers import PixelNormLayer, EqualizedLinear
 import random
 import functools
 import pdb

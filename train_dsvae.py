@@ -131,6 +131,7 @@ def accumulate_batches(data_iter, num):
     samples = []
     while num > 0:
         data = next(data_iter)
+        data = data['frames']
         samples.append(data)
         num -= data.size(0)
     samples = torch.cat(samples, dim=0)
@@ -147,22 +148,39 @@ def flip_video(x):
         return x
 
 
+def encode_sequence(x_seq, encoder, posterior):
+    # x_seq is a sequence of shape [N, T, C, H, W]
+    shape = x_seq.shape
+    x_lat = encoder(x_seq.view(-1, *shape[2:]))
+    f_post, y_post = posterior(x_lat.view(shape[0], shape[1], -1))
+    return f_post, y_post
+
+
+def decode_sequence(f_post, z_post, generator):
+    N, T = z_post.shape[0], z_post.shape[1]
+    f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+    w_post = f_expand + z_post  # shape [N, T, latent_full]
+    x_img, _ = generator([w_post.view(N*T, -1)], input_is_latent=True, return_latents=False)
+    x_seq = x_img.view(z_post.shape[0], z_post.shape[1], *x_img.shape[1:])
+
+
 def train(
     args,
     loader,
     encoder,
     generator,
     discriminator,
-    discv,  # video disctiminator
+    discriminator3d,  # video disctiminator
     posterior,
     prior,
-    dictionary,  # a learnable matrix
+    factor,  # a learnable matrix
     vggnet,
     e_optim,
     d_optim,
     dv_optim,
     q_optim,  # q for posterior
     p_optim,  # p for prior
+    f_optim,  # f for factor
     e_ema,
     device
 ):
@@ -199,12 +217,23 @@ def train(
     r_t_stat = 0
 
     latent_full = args.latent_full
-    dict_dim = args.dict_dim
+    factor_dim = args.factor_dim
 
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
     sample_x = accumulate_batches(loader, args.n_sample).to(device)
+    utils.save_image(
+        sample_x.view(-1, *list(sample_x.shape)[2:]),
+        os.path.join(args.log_dir, 'sample', f"real-img.png"),
+        nrow=sample_x.shape[1],
+        normalize=True,
+        range=(-1, 1),
+    )
+    util.save_video(
+        sample_x[5],
+        os.path.join(args.log_dir, 'sample', f"real-vid.mp4")
+    )
 
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
@@ -235,16 +264,22 @@ def train(
 
         # TODO: real_seq -> encoder -> posterior -> generator -> fake_seq
         # f: [N, latent_full]; y: [N, T, D]
-        post_f, post_y = encoder(real_seq.view(-1, *shape[2:]))
-        post_z = dictionary(post_y)
-        f_expand = post_f.unsqueeze(1).expand(-1, T, -1)
-        post_w = f_expand + post_z  # shape [N, T, latent_full]
-        fake_img, _ = generator([post_w.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+
+        real_lat = encoder(real_seq.view(-1, *shape[2:]))
+        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
+        z_post = factor(y_post)
+        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        w_post = f_expand + z_post  # shape [N, T, latent_full]
+        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
         fake_seq = fake_img.view(N, T, *shape[2:])
 
+        # real_lat = encoder(real_seq.view(-1, *shape[2:]))
+        # fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
+        # fake_seq = fake_img.view(N, T, *shape[2:])
+
         # TODO: sample frames
-        real_img = real_seq.view(N*T, shape[2:])
-        fake_img = fake_seq.view(N*T, shape[2:])
+        real_img = real_seq.view(N*T, *shape[2:])
+        # fake_img = fake_seq.view(N*T, *shape[2:])
 
         if args.lambda_adv > 0:
             if args.augment:
@@ -262,9 +297,15 @@ def train(
             real_feat = vggnet(real_img)
             fake_feat = vggnet(fake_img)
             vgg_loss = torch.mean((real_feat - fake_feat) ** 2)
+        
+        # Train Encoder with video-level objectives
+        # TODO: video adversarial loss
+        if args.lambda_vid > 0:
+            fake_pred = discriminator3d(flip_video(fake_seq.transpose(1, 2)))
+            vid_loss = criterionGAN(fake_pred, True)
 
         e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
-        e_loss += args.lambda_vid * vid_loss
+        e_loss = e_loss + args.lambda_vid * vid_loss
         loss_dict["e"] = e_loss
         loss_dict["pix"] = pix_loss
         loss_dict["vgg"] = vgg_loss
@@ -275,12 +316,6 @@ def train(
         e_loss.backward()
         e_optim.step()
         q_optim.step()
-
-        # Train Encoder with video-level objectives
-        # TODO: video adversarial loss
-        if args.lambda_vid > 0:
-            fake_pred = discv(flip_video(fake_seq.transpose(1, 2)))
-            vid_loss = criterionGAN(fake_pred, True)
 
         # if args.train_on_fake:
         #     e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
@@ -296,34 +331,34 @@ def train(
         #         e_optim.step()
         #         loss_dict["rec"] = rec_loss
 
-        e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
-        if e_regularize:
-            # why not regularize on augmented real?
-            real_img.requires_grad = True
-            real_pred = encoder(real_img)
-            r1_loss_e = d_r1_loss(real_pred, real_img)
+        # e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
+        # if e_regularize:
+        #     # why not regularize on augmented real?
+        #     real_img.requires_grad = True
+        #     real_pred = encoder(real_img)
+        #     r1_loss_e = d_r1_loss(real_pred, real_img)
 
-            encoder.zero_grad()
-            (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
-            e_optim.step()
+        #     encoder.zero_grad()
+        #     (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
+        #     e_optim.step()
 
-            loss_dict["r1_e"] = r1_loss_e
+        #     loss_dict["r1_e"] = r1_loss_e
 
         if not args.no_ema and e_ema is not None:
             accumulate(e_ema, e_module, accum)
         
         # Train Discriminator
-        
         if args.toggle_grads:
             requires_grad(encoder, False)
             requires_grad(discriminator, True)
-        post_f, post_y = encoder(real_seq.view(-1, *shape[2:]))
-        post_z = dictionary(post_y)
-        f_expand = post_f.unsqueeze(1).expand(-1, T, -1)
-        post_w = f_expand + post_z  # shape [N, T, latent_full]
-        fake_img, _ = generator([post_w.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        real_lat = encoder(real_seq.view(-1, *shape[2:]))
+        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
+        z_post = factor(y_post)
+        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        w_post = f_expand + z_post  # shape [N, T, latent_full]
+        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
         fake_seq = fake_img.view(N, T, *shape[2:])
-        fake_img = fake_seq.view(N*T, shape[2:])
+        # fake_img = fake_seq.view(N*T, *shape[2:])
         if not args.no_update_discriminator and args.lambda_adv > 0:
             if args.augment:
                 real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -336,13 +371,24 @@ def train(
             real_pred = discriminator(real_img_aug)
             d_loss = d_logistic_loss(real_pred, fake_pred)
 
+            # Train video discriminator
+            # TODO: train video disc
+            pred_real = discriminator3d(flip_video(real_seq.transpose(1, 2)))
+            pred_fake = discriminator3d(flip_video(fake_seq.transpose(1, 2)))
+            dv_loss_real = criterionGAN(pred_real, True)
+            dv_loss_fake = criterionGAN(pred_fake, False)
+            dv_loss = 0.5 * (dv_loss_real + dv_loss_fake)
+            d_loss = d_loss + dv_loss
+
             loss_dict["d"] = d_loss
             loss_dict["real_score"] = real_pred.mean()
             loss_dict["fake_score"] = fake_pred.mean()
 
             discriminator.zero_grad()
+            discriminator3d.zero_grad()
             d_loss.backward()
             d_optim.step()
+            dv_optim.step()
 
             if args.augment and args.augment_p == 0:
                 ada_aug_p = ada_augment.tune(real_pred)
@@ -361,18 +407,6 @@ def train(
                 d_optim.step()
 
                 loss_dict["r1_d"] = r1_loss_d
-        
-        # Train video discriminator
-        # TODO: train video disc
-        pred_real = discv(flip_video(real_seq.transpose(1, 2)))
-        pred_fake = discv(flip_video(fake_seq.transpose(1, 2)))
-        dv_loss_real = criterionGAN(pred_real, True)
-        dv_loss_fake = criterionGAN(pred_fake, False)
-        dv_loss = 0.5 * (dv_loss_real + dv_loss_fake)
-
-        discv.zero_grad()
-        dv_loss.backward()
-        dv_optim.step()
 
         loss_reduced = reduce_loss_dict(loss_dict)
 
@@ -418,18 +452,24 @@ def train(
                 with torch.no_grad():
                     e_eval = encoder if args.no_ema else e_ema
                     e_eval.eval()
-                    nrow = int(args.n_sample ** 0.5)
-                    nchw = list(sample_x.shape)[1:]
-                    latent_real = e_eval(sample_x)
-                    fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
-                    sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
-                                        fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    N = sample_x.shape[0]
+                    x_lat = encoder(sample_x.view(-1, *shape[2:]))
+                    f_post, y_post = posterior(x_lat.view(N, T, latent_full))
+                    z_post = factor(y_post)
+                    f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+                    w_post = f_expand + z_post
+                    fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+                    fake_seq = fake_img.view(N, T, *shape[2:])
                     utils.save_image(
-                        sample.reshape(2*args.n_sample, *nchw),
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
-                        nrow=nrow,
+                        fake_seq.view(-1, *shape[2:]),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-img_recon.png"),
+                        nrow=T,
                         normalize=True,
                         range=(-1, 1),
+                    )
+                    util.save_video(
+                        fake_seq[5],
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-vid_recon.mp4")
                     )
                     e_eval.train()
 
@@ -495,12 +535,15 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_vid", type=float, default=0.1)
     parser.add_argument("--lambda_rec", type=float, default=1.0, help="recon loss on style (w)")
     parser.add_argument("--output_layer_idx", type=int, default=23)
-    parser.add_argument("--vgg_ckpt", type=str, default="pretrained/vgg16.pth")
+    parser.add_argument("--vgg_ckpt", type=str, default="vgg16.pth")
     parser.add_argument("--which_encoder", type=str, default='style')
     parser.add_argument("--which_latent", type=str, default='w_shared')
     parser.add_argument("--use_conditional_posterior", action='store_true')
     parser.add_argument("--use_concat_posterior", action='store_true')
-    parser.add_argument("--dict_dim", type=int, default=512)
+    parser.add_argument("--factor_dim", type=int, default=512)
+    parser.add_argument("--frame_num", type=int, default=50)
+    parser.add_argument("--frame_step", type=int, default=1)
+    parser.add_argument("--factor_ckpt", type=str, default='factor.pt')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -510,7 +553,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_sample",
         type=int,
-        default=64,
+        default=8,
         help="number of the samples generated during training",
     )
     parser.add_argument(
@@ -692,16 +735,24 @@ if __name__ == "__main__":
 
     # TODO
     from model import LSTMPosterior
-    posterior = LSTMPosterior(latent=args.latent, latent_full=args.latent_full, dict_dim=args.dict_dim,
+    posterior = LSTMPosterior(latent=args.latent, latent_full=args.latent_full, factor_dim=args.factor_dim,
                               conditional=args.use_conditional_posterior, concat=args.use_concat_posterior).to(device)
     prior = None
-    discv = None
+    discriminator3d = None
+    factor = None
     from models.networks import PatchVideoDiscriminator
-    discv = PatchVideoDiscriminator(3).to(device)
-    dictionary = LearnableMatrix(args.dict_dim, args.latent_full).to(device)
+    discriminator3d = PatchVideoDiscriminator(3).to(device)
+    # TODO: use bolei's official sefa code?
+    if os.path.exists(args.factor_ckpt):
+        ckpt = torch.load(args.factor_ckpt, map_location=lambda storage, loc: storage)
+        factor = ckpt["eigvec"]  # [512, D]
+        if factor.shape[0] != args.latent_full:
+            factor = factor.repeat(args.n_latent, 1)
+    factor = LearnableMatrix(args.factor_dim, args.latent_full, weight=factor).to(device)
     q_optim = optim.Adam(posterior.parameters(), lr=args.lr, betas=(0, 0.99))
     p_optim = None
-    dv_optim = optim.Adam(discv.parameters(), lr=args.lr, betas=(0, 0.99))
+    dv_optim = optim.Adam(discriminator3d.parameters(), lr=args.lr, betas=(0, 0.99))
+    f_optim = None
 
     if args.ckpt is not None:
         print("load model:", args.ckpt)
@@ -717,6 +768,12 @@ if __name__ == "__main__":
         if not args.no_load_discriminator:
             discriminator.load_state_dict(ckpt["d"])
             d_optim.load_state_dict(ckpt["d_optim"])
+        
+        if not args.no_load_encoder:
+            encoder.load_state_dict(ckpt["e"])
+            e_optim.load_state_dict(ckpt["e_optim"])
+            if e_ema is not None and 'e_ema' in ckpt:
+                e_ema.load_state_dict(ckpt["e_ema"])
 
         if args.resume:
             try:
@@ -727,8 +784,6 @@ if __name__ == "__main__":
                     args.start_iter = int(os.path.splitext(ckpt_name)[0])
             except ValueError:
                 pass
-            encoder.load_state_dict(ckpt["e"])
-            e_optim.load_state_dict(ckpt["e_optim"])
 
     if args.distributed:
         encoder = nn.parallel.DistributedDataParallel(
@@ -751,14 +806,14 @@ if __name__ == "__main__":
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
-        discv = nn.parallel.DistributedDataParallel(
-            discv,
+        discriminator3d = nn.parallel.DistributedDataParallel(
+            discriminator3d,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
-        dictionary = nn.parallel.DistributedDataParallel(
-            dictionary,
+        factor = nn.parallel.DistributedDataParallel(
+            factor,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
@@ -774,7 +829,8 @@ if __name__ == "__main__":
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
         ]
     )
-    dataset = VideoFolderDataset(args.path, transform, mode='video', cache=args.cache)
+    dataset = VideoFolderDataset(args.path, transform, mode='video', cache=args.cache,
+                                 frame_num=args.frame_num, frame_step=args.frame_step)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
@@ -785,5 +841,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, encoder, g_ema, discriminator, discv, posterior, prior, dictionary,
-          vggnet, e_optim, d_optim, dv_optim, q_optim, p_optim, e_ema, device)
+    train(args, loader, encoder, g_ema, discriminator, discriminator3d, posterior, prior, factor,
+          vggnet, e_optim, d_optim, dv_optim, q_optim, p_optim, f_optim, e_ema, device)

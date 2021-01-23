@@ -4,6 +4,7 @@ import math
 import torch
 import random
 import numpy as np
+from torchvision.io import write_video
 
 
 def seed_everything(seed=42):
@@ -111,3 +112,9 @@ class AverageMeter(object):
             self.avg[self.count == 0] = 0
             self.vec2sca_avg = self.avg.sum() / len(self.avg)
             self.vec2sca_val = self.val.sum() / len(self.val)
+
+
+def save_video(xseq, path):
+    video = xseq.data.cpu().clamp(-1, 1)
+    video = ((video+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
+    write_video(path, video, fps=15)

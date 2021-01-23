@@ -100,12 +100,6 @@ def encode(encoder, seq, args):
     return latent
 
 
-def save_video(seq, path):
-    video = seq.data.cpu().clamp(-1, 1)
-    video = ((video+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
-    write_video(path, video, fps=15)
-
-
 @torch.no_grad()
 def run(args, loader, encoder, generator, device):
     if args.distributed:
@@ -151,12 +145,12 @@ def run(args, loader, encoder, generator, device):
         utils.save_image(recB, os.path.join(args.output_dir, f'{counter:03d}-img_reconB.png'), nrow=T-1, normalize=True, range=(-1, 1))
         utils.save_image(coAmoB, os.path.join(args.output_dir, f'{counter:03d}-img_coA+moB.png'), nrow=T-1, normalize=True, range=(-1, 1))
         utils.save_image(coBmoA, os.path.join(args.output_dir, f'{counter:03d}-img_coB+moA.png'), nrow=T-1, normalize=True, range=(-1, 1))
-        save_video(oriA, os.path.join(args.output_dir, f'{counter:03d}-vid_origA.mp4'))
-        save_video(oriB, os.path.join(args.output_dir, f'{counter:03d}-vid_origB.mp4'))
-        save_video(recA, os.path.join(args.output_dir, f'{counter:03d}-vid_reconA.mp4'))
-        save_video(recB, os.path.join(args.output_dir, f'{counter:03d}-vid_reconB.mp4'))
-        save_video(coAmoB, os.path.join(args.output_dir, f'{counter:03d}-vid_coA+moB.mp4'))
-        save_video(coBmoA, os.path.join(args.output_dir, f'{counter:03d}-vid_coB+moA.mp4'))
+        util.save_video(oriA, os.path.join(args.output_dir, f'{counter:03d}-vid_origA.mp4'))
+        util.save_video(oriB, os.path.join(args.output_dir, f'{counter:03d}-vid_origB.mp4'))
+        util.save_video(recA, os.path.join(args.output_dir, f'{counter:03d}-vid_reconA.mp4'))
+        util.save_video(recB, os.path.join(args.output_dir, f'{counter:03d}-vid_reconB.mp4'))
+        util.save_video(coAmoB, os.path.join(args.output_dir, f'{counter:03d}-vid_coA+moB.mp4'))
+        util.save_video(coBmoA, os.path.join(args.output_dir, f'{counter:03d}-vid_coB+moA.mp4'))
         if counter >= args.n_sample:
             break
 

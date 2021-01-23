@@ -1,7 +1,8 @@
 import argparse
 
 import torch
-
+import pdb
+st = pdb.set_trace
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -11,7 +12,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--out", type=str, default="factor.pt", help="name of the result factor file"
     )
-    parser.add_argument("ckpt", type=str, help="name of the model checkpoint")
+    parser.add_argument("--ckpt", type=str, help="name of the model checkpoint")
 
     args = parser.parse_args()
 
@@ -25,7 +26,6 @@ if __name__ == "__main__":
     weight_mat = []
     for k, v in modulate.items():
         weight_mat.append(v)
-
     W = torch.cat(weight_mat, 0)
     eigvec = torch.svd(W).V.to("cpu")
 

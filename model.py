@@ -9,6 +9,8 @@ from torch.nn import functional as F
 from torch.autograd import Function
 
 from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
+from models.stylegan_layers import EqualizedLinear
+import numpy as np
 import pdb
 st = pdb.set_trace
 
@@ -755,7 +757,7 @@ class Encoder(nn.Module):
 
 
 class LSTMPosterior(nn.Module):
-    def __init__(self, latent=512, latent_full=512, hidden_dim=512, dict_dim=512,
+    def __init__(self, latent=512, latent_full=512, hidden_dim=512, factor_dim=512,
                  bidirectional=True, conditional=True, concat=False):
         """
         input: latent sequence [N, T, latent]
@@ -771,19 +773,28 @@ class LSTMPosterior(nn.Module):
         hidden_multiply = 2 if self.bidirectional else 1
         self.f_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
         # TODO: use MLP?
+        # self.f_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, latent_full, lr_mul=0.01, activation="fused_lrelu"),
+        # )
+        gain = np.sqrt(2)
         self.f_mlp = nn.Sequential(
-            EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
-            EqualLinear(hidden_dim, latent, lr_mul=0.01, activation="fused_lrelu"),
+            EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+            EqualizedLinear(hidden_dim, latent_full, gain=gain, lrmul=0.01, use_wscale=True),
         )
         if conditional and concat:
             self.y_lstm = nn.LSTM(self.latent_full+self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
         else:
             self.y_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
         # TODO: use MLP? or skip?
-        self.y_rnn = nn.RNN(hidden_multiply*hidden_dim, dict_dim, batch_first=True)
+        self.y_rnn = nn.RNN(hidden_multiply*hidden_dim, factor_dim, batch_first=True)
+        # self.y_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, factor_dim, lr_mul=0.01, activation="fused_lrelu"),
+        # )
         self.y_mlp = nn.Sequential(
-            EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
-            EqualLinear(hidden_dim, dict_dim, lr_mul=0.01, activation="fused_lrelu"),
+            EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+            EqualizedLinear(hidden_dim, factor_dim, gain=gain, lrmul=0.01, use_wscale=True),
         )
     
     def encode_f(self, z_in):
@@ -800,7 +811,7 @@ class LSTMPosterior(nn.Module):
     
     def encode_y(self, z_in, f):
         # z_in: [N, T, latent_full]; f: [N, latent_full]
-        f_expand = f.unsqueeze(1).expand(-1, z_in.size(1), -1)
+        f_expand = f.unsqueeze(1).expand(-1, z_in.shape[1], -1)
         if self.conditional:
             if self.concat:
                 lstm_out, _ = self.y_lstm(torch.cat((z_in, f_expand), dim=2))
@@ -809,8 +820,11 @@ class LSTMPosterior(nn.Module):
         else:
             lstm_out, _ = self.y_lstm(z_in)
         y_out, _ = self.y_rnn(lstm_out)
-        y_out += self.y_mlp(lstm_out)
-        return y_out
+        # Note that EqualLinear cannot handle tensor of shape [N, T, D]
+        # y_skip = self.y_mlp(lstm_out.contiguous().view(z_in.shape[0]*z_in.shape[1], -1))
+        # y_out = y_out + y_skip.view(z_in.shape[0], z_in.shape[1], -1)
+        # y_out = y_out + self.y_mlp(lstm_out)
+        return y_out + self.y_mlp(lstm_out)
     
     def forward(self, z_in):
         # z_in [N, T, latent] or [N, T, n_latent, latent]

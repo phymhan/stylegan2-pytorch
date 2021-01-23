@@ -36,6 +36,6 @@ if __name__ == '__main__':
     root = os.path.join(os.path.dirname(sys.argv[0]), os.pardir)
 
     if len(args.name) == 0:
-        names = os.listdir(os.path.join(root, args.log_root))
-    for name in names:
-        clean_experiment(os.path.join(root, args.log_root, name), args.folder=='sample', args.folder=='weight', args.save_every)
+        args.name = os.listdir(os.path.join(root, args.log_root))
+    for n in args.name:
+        clean_experiment(os.path.join(root, args.log_root, n), args.folder=='sample', args.folder=='weight', args.save_every)

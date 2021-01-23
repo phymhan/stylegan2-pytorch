@@ -237,6 +237,10 @@ def train(
 
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
+    if args.no_update_encoder:
+        encoder = e_ema if e_ema is not None else encoder
+        requires_grad(encoder, False)
+        encoder.eval()
     from models.networks_3d import GANLoss
     criterionGAN = GANLoss()
 
@@ -258,7 +262,8 @@ def train(
 
         # Train Encoder with frame-level objectives
         if args.toggle_grads:
-            requires_grad(encoder, True)
+            if not args.no_update_encoder:
+                requires_grad(encoder, True)
             requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = vid_loss = torch.tensor(0., device=device)
 
@@ -310,12 +315,14 @@ def train(
         loss_dict["pix"] = pix_loss
         loss_dict["vgg"] = vgg_loss
         loss_dict["adv"] = adv_loss
-
-        encoder.zero_grad()
+        
+        if not args.no_update_encoder:
+            encoder.zero_grad()
         posterior.zero_grad()
         e_loss.backward()
-        e_optim.step()
         q_optim.step()
+        if not args.no_update_encoder:
+            e_optim.step()
 
         # if args.train_on_fake:
         #     e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
@@ -344,8 +351,9 @@ def train(
 
         #     loss_dict["r1_e"] = r1_loss_e
 
-        if not args.no_ema and e_ema is not None:
-            accumulate(e_ema, e_module, accum)
+        if not args.no_update_encoder:
+            if not args.no_ema and e_ema is not None:
+                accumulate(e_ema, e_module, accum)
         
         # Train Discriminator
         if args.toggle_grads:
@@ -720,12 +728,11 @@ if __name__ == "__main__":
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1) if args.d_reg_every > 0 else 1.
     
     e_optim = d_optim = None
-    if not args.no_update_encoder:
-        e_optim = optim.Adam(
-            encoder.parameters(),
-            lr=args.lr * e_reg_ratio,
-            betas=(0 ** e_reg_ratio, 0.99 ** e_reg_ratio),
-        )
+    e_optim = optim.Adam(
+        encoder.parameters(),
+        lr=args.lr * e_reg_ratio,
+        betas=(0 ** e_reg_ratio, 0.99 ** e_reg_ratio),
+    )
     if not args.no_update_discriminator:
         d_optim = optim.Adam(
             discriminator.parameters(),

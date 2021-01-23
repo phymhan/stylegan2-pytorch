@@ -72,9 +72,10 @@ class VideoFolderDataset(Dataset):
         min_len=8,
         frame_num=8,
         frame_step=1,
+        nframe_num=3,  # Number of consecutive frames, when `mode`=='nframe'
         cache=None,
     ):
-        assert(mode in ['video', 'image', 'pair', 'triplet'])
+        assert(mode in ['video', 'image', 'pair', 'nframe'])
         self.mode = mode
         self.root = dataroot
         self.cache = cache
@@ -82,6 +83,7 @@ class VideoFolderDataset(Dataset):
         self.min_len = min_len
         self.frame_num = frame_num
         self.frame_step = frame_step
+        self.nframe_num = nframe_num
         self.videos = []
         self.lengths = []
         
@@ -118,8 +120,8 @@ class VideoFolderDataset(Dataset):
         self.cumsum = np.cumsum([0] + self.lengths)
         self.lengths1 = [i - 1 for i in self.lengths]
         self.cumsum1 = np.cumsum([0] + self.lengths1)
-        self.lengths2 = [i - 2 for i in self.lengths]
-        self.cumsum2 = np.cumsum([0] + self.lengths2)
+        self.lengthsn = [i - nframe_num + 1 for i in self.lengths]
+        self.cumsumn = np.cumsum([0] + self.lengthsn)
         print("Total numver of videos {}.".format(len(self.videos)))
         print("Total number of frames {}.".format(np.sum(self.lengths)))
         if self.mode == 'video':
@@ -128,8 +130,8 @@ class VideoFolderDataset(Dataset):
             self._dataset_length = np.sum(self.lengths)
         elif self.mode == 'pair':
             self._dataset_length = np.sum(self.lengths1)
-        else:  # self.mode == 'triplet'
-            self._dataset_length = np.sum(self.lengths2)
+        else:  # self.mode == 'nframe'
+            self._dataset_length = np.sum(self.lengthsn)
 
     def _get_video(self, index):
         video_len = self.lengths[index]
@@ -141,7 +143,7 @@ class VideoFolderDataset(Dataset):
         frames = torch.stack(frames, 0)
         frames = self.transform(frames)
         return {'frames': frames, 'path': os.path.basename(os.path.dirname(self.videos[index][0]))}
-    
+
     def _get_image(self, index):
         # copied from MoCoGAN
         if index == 0:
@@ -154,7 +156,7 @@ class VideoFolderDataset(Dataset):
         frame = F.to_tensor(frame)
         frame = self.transform(frame)  # no ToTensor in transform
         return frame
-    
+
     def _get_pair(self, index):
         if index == 0:
             video_id = 0
@@ -170,24 +172,22 @@ class VideoFolderDataset(Dataset):
         frames = torch.stack([frame1, frame2], 0)
         frames = self.transform(frames)
         return frames.unbind(0)
-    
-    def _get_triplet(self, index):
+
+    def _get_nframe(self, index):
         if index == 0:
             video_id = 0
             frame_id = 0
         else:
-            video_id = np.searchsorted(self.cumsum2, index) - 1
-            frame_id = index - self.cumsum2[video_id] - 1
-        frame1 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id]))
-        frame1 = F.to_tensor(frame1)
-        frame2 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id + 1]))
-        frame2 = F.to_tensor(frame2)
-        frame3 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id + 2]))
-        frame3 = F.to_tensor(frame3)
-        frames = torch.stack([frame1, frame2, frame3], 0)
+            video_id = np.searchsorted(self.cumsumn, index) - 1
+            frame_id = index - self.cumsumn[video_id] - 1
+        frames = []
+        for i in range(self.nframe_num):
+            frame = Image.open(os.path.join(self.root, self.videos[video_id][frame_id + i]))
+            frames.append(F.to_tensor(frame))
+        frames = torch.stack(frames, 0)
         frames = self.transform(frames)
         return frames.unbind(0)
-    
+
     def __getitem__(self, index):
         if self.mode == 'video':
             return self._get_video(index)
@@ -195,8 +195,8 @@ class VideoFolderDataset(Dataset):
             return self._get_image(index)
         elif self.mode == 'pair':
             return self._get_pair(index)
-        else:  # mode == 'triplet'
-            return self._get_triplet(index)
+        else:  # mode == 'nframe'
+            return self._get_nframe(index)
 
     def __len__(self):
         return self._dataset_length

@@ -134,10 +134,27 @@ wandb/
 
 data
 checkpoints*
+sample
 samples*
 latents*
 logs*
+pretrained*
 *.back
 *.bak
 
 *.pth
+*/*.pth
+*/*/*.pth
+*.pt
+*/*.pt
+*/*/*.pt
+
+.DS_Store
+*/.DS_Store
+*/*/.DS_Store
+
+*/__pycache__
+*/*/__pycache__
+
+.vscode
+.idea

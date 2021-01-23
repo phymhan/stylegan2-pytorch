@@ -470,7 +470,7 @@ if __name__ == "__main__":
     device = "cuda"
 
     parser = argparse.ArgumentParser(description="StyleGAN2 encoder trainer")
-
+    parser.add_argument("--no_cuda", action='store_true')
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
     parser.add_argument("--cache", type=str, default='local.db')
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
@@ -601,6 +601,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     util.seed_everything()
+    if args.no_cuda:
+        device = 'cpu'
 
     n_gpu = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = n_gpu > 1

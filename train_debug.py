@@ -164,6 +164,59 @@ def decode_sequence(f_post, z_post, generator):
     x_seq = x_img.view(z_post.shape[0], z_post.shape[1], *x_img.shape[1:])
 
 
+def reconstruct_sequence(args, x_seq, encoder, generator, factor, posterior):
+    shape = list(x_seq.shape)
+    N, T = shape[:2]
+    latent_full = args.latent_full
+    if args.debug == 'no_lstm':
+        real_lat = encoder(x_seq.view(-1, *shape[2:]))
+        fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
+        fake_seq = fake_img.view(N, T, *shape[2:])
+    elif args.debug == 'decomp':
+        real_lat = encoder(x_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
+        f_post = real_lat[::T, ...]
+        z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
+        if args.use_multi_head:
+            y_post = []
+            for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
+                y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
+            y_post = torch.cat(y_post, 2)
+        else:
+            y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
+        z_post_hat = factor(y_post)
+        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        w_post = f_expand + z_post_hat
+        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        fake_seq = fake_img.view(N, T, *shape[2:])
+    elif args.debug == 'coef':
+        real_lat = encoder(x_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
+        f_post = real_lat[::T, ...]
+        z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
+        if args.use_multi_head:
+            y_post = []
+            for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
+                y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
+            y_post = torch.cat(y_post, 2)
+        else:
+            y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
+        z_post_hat = factor(y_post)
+        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        w_post = f_expand + z_post_hat
+        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        fake_seq = fake_img.view(N, T, *shape[2:])
+    else:
+        real_lat = encoder(x_seq.view(-1, *shape[2:]))
+        # single head: f_post [N, latent_full]; y_post [N, T, D]
+        # multi head: f_post [N, n_latent, latent]; y_post [N, T, n_latent, d]
+        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
+        z_post = factor(y_post)
+        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        w_post = f_expand + z_post  # shape [N, T, latent_full]
+        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        fake_seq = fake_img.view(N, T, *shape[2:])
+    return fake_img, fake_seq
+
+
 def train(
     args,
     loader,
@@ -217,7 +270,7 @@ def train(
     r_t_stat = 0
 
     latent_full = args.latent_full
-    factor_dim = args.factor_dim
+    factor_dim_full = args.factor_dim_full
 
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
@@ -269,18 +322,37 @@ def train(
 
         # TODO: real_seq -> encoder -> posterior -> generator -> fake_seq
         # f: [N, latent_full]; y: [N, T, D]
-
-        real_lat = encoder(real_seq.view(-1, *shape[2:]))
-        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        z_post = factor(y_post)
-        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        w_post = f_expand + z_post  # shape [N, T, latent_full]
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-
-        # real_lat = encoder(real_seq.view(-1, *shape[2:]))
-        # fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
-        # fake_seq = fake_img.view(N, T, *shape[2:])
+        fake_img, fake_seq = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior)
+        # if args.debug == 'no_lstm':
+        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
+        #     fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
+        #     fake_seq = fake_img.view(N, T, *shape[2:])
+        # elif args.debug == 'decomp':
+        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
+        #     f_post = real_lat[::T, ...]
+        #     z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
+        #     if args.use_multi_head:
+        #         y_post = []
+        #         for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
+        #             y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
+        #         y_post = torch.cat(y_post, 2)
+        #     else:
+        #         y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
+        #     z_post_hat = factor(y_post)
+        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        #     w_post = f_expand + z_post_hat
+        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        #     fake_seq = fake_img.view(N, T, *shape[2:])
+        # else:
+        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
+        #     # single head: f_post [N, latent_full]; y_post [N, T, D]
+        #     # multi head: f_post [N, n_latent, latent]; y_post [N, T, n_latent, d]
+        #     f_post, y_post = posterior(real_lat.view(N, T, latent_full))
+        #     z_post = factor(y_post)
+        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        #     w_post = f_expand + z_post  # shape [N, T, latent_full]
+        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        #     fake_seq = fake_img.view(N, T, *shape[2:])
 
         # TODO: sample frames
         real_img = real_seq.view(N*T, *shape[2:])
@@ -359,44 +431,81 @@ def train(
         if args.toggle_grads:
             requires_grad(encoder, False)
             requires_grad(discriminator, True)
-        real_lat = encoder(real_seq.view(-1, *shape[2:]))
-        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        z_post = factor(y_post)
-        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        w_post = f_expand + z_post  # shape [N, T, latent_full]
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
+        fake_img, fake_seq = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior)
+        # if args.debug == 'no_lstm':
+        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
+        #     fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
+        #     fake_seq = fake_img.view(N, T, *shape[2:])
+        # elif args.debug == 'decomp':
+        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
+        #     f_post = real_lat[::T, ...]
+        #     z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
+        #     if args.use_multi_head:
+        #         y_post = []
+        #         for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
+        #             y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
+        #         y_post = torch.cat(y_post, 2)
+        #     else:
+        #         y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
+        #     z_post_hat = factor(y_post)
+        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        #     w_post = f_expand + z_post_hat
+        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        #     fake_seq = fake_img.view(N, T, *shape[2:])
+        # elif args.debug == 'coef':
+        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
+        #     f_post = real_lat[::T, ...]
+        #     z_post_hat = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
+        #     y_post = torch.mm(z_post_hat.view(N*T, -1), factor.weight).view(N, T, -1)
+        #     z_post = factor(y_post)
+        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        #     w_post = f_expand + z_post
+        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        #     fake_seq = fake_img.view(N, T, *shape[2:])
+        # else:
+        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
+        #     f_post, y_post = posterior(real_lat.view(N, T, latent_full))
+        #     z_post = factor(y_post)
+        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+        #     w_post = f_expand + z_post  # shape [N, T, latent_full]
+        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+        #     fake_seq = fake_img.view(N, T, *shape[2:])
         # fake_img = fake_seq.view(N*T, *shape[2:])
-        if not args.no_update_discriminator and args.lambda_adv > 0:
-            if args.augment:
-                real_img_aug, _ = augment(real_img, ada_aug_p)
-                fake_img_aug, _ = augment(fake_img, ada_aug_p)
-            else:
-                real_img_aug = real_img
-                fake_img_aug = fake_img
-            
-            fake_pred = discriminator(fake_img_aug)
-            real_pred = discriminator(real_img_aug)
-            d_loss = d_logistic_loss(real_pred, fake_pred)
+        if not args.no_update_discriminator:
+            if args.lambda_adv > 0:
+                if args.augment:
+                    real_img_aug, _ = augment(real_img, ada_aug_p)
+                    fake_img_aug, _ = augment(fake_img, ada_aug_p)
+                else:
+                    real_img_aug = real_img
+                    fake_img_aug = fake_img
+                
+                fake_pred = discriminator(fake_img_aug)
+                real_pred = discriminator(real_img_aug)
+                d_loss = d_logistic_loss(real_pred, fake_pred)
 
             # Train video discriminator
-            # TODO: train video disc
-            pred_real = discriminator3d(flip_video(real_seq.transpose(1, 2)))
-            pred_fake = discriminator3d(flip_video(fake_seq.transpose(1, 2)))
-            dv_loss_real = criterionGAN(pred_real, True)
-            dv_loss_fake = criterionGAN(pred_fake, False)
-            dv_loss = 0.5 * (dv_loss_real + dv_loss_fake)
-            d_loss = d_loss + dv_loss
+            if args.lambda_vid > 0:
+                pred_real = discriminator3d(flip_video(real_seq.transpose(1, 2)))
+                pred_fake = discriminator3d(flip_video(fake_seq.transpose(1, 2)))
+                dv_loss_real = criterionGAN(pred_real, True)
+                dv_loss_fake = criterionGAN(pred_fake, False)
+                dv_loss = 0.5 * (dv_loss_real + dv_loss_fake)
+                d_loss = d_loss + dv_loss
 
             loss_dict["d"] = d_loss
             loss_dict["real_score"] = real_pred.mean()
             loss_dict["fake_score"] = fake_pred.mean()
 
-            discriminator.zero_grad()
-            discriminator3d.zero_grad()
+            if args.lambda_adv > 0:
+                discriminator.zero_grad()
+            if args.lambda_vid > 0:
+                discriminator3d.zero_grad()
             d_loss.backward()
-            d_optim.step()
-            dv_optim.step()
+            if args.lambda_adv > 0:
+                d_optim.step()
+            if args.lambda_vid > 0:
+                dv_optim.step()
 
             if args.augment and args.augment_p == 0:
                 ada_aug_p = ada_augment.tune(real_pred)
@@ -460,16 +569,39 @@ def train(
                 with torch.no_grad():
                     e_eval = encoder if args.no_ema else e_ema
                     e_eval.eval()
-                    N = sample_x.shape[0]
-                    x_lat = encoder(sample_x.view(-1, *shape[2:]))
-                    f_post, y_post = posterior(x_lat.view(N, T, latent_full))
-                    z_post = factor(y_post)
-                    f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-                    w_post = f_expand + z_post
-                    fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-                    fake_seq = fake_img.view(N, T, *shape[2:])
+                    posterior.eval()
+                    # N = sample_x.shape[0]
+                    fake_img, fake_seq = reconstruct_sequence(args, sample_x, e_eval, generator, factor, posterior)
+                    # if args.debug == 'no_lstm':
+                    #     real_lat = encoder(sample_x.view(-1, *shape[2:]))
+                    #     fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
+                    #     fake_seq = fake_img.view(N, T, *shape[2:])
+                    # elif args.debug == 'decomp':
+                    #     real_lat = encoder(sample_x.view(-1, *shape[2:]))  # [N*T, latent_full]
+                    #     f_post = real_lat[::T, ...]
+                    #     z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
+                    #     if args.use_multi_head:
+                    #         y_post = []
+                    #         for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
+                    #             y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
+                    #         y_post = torch.cat(y_post, 2)
+                    #     else:
+                    #         y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
+                    #     z_post_hat = factor(y_post)
+                    #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+                    #     w_post = f_expand + z_post_hat
+                    #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+                    #     fake_seq = fake_img.view(N, T, *shape[2:])
+                    # else:
+                    #     x_lat = encoder(sample_x.view(-1, *shape[2:]))
+                    #     f_post, y_post = posterior(x_lat.view(N, T, latent_full))
+                    #     z_post = factor(y_post)
+                    #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+                    #     w_post = f_expand + z_post
+                    #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+                    #     fake_seq = fake_img.view(N, T, *shape[2:])
                     utils.save_image(
-                        fake_seq.view(-1, *shape[2:]),
+                        torch.cat((sample_x, fake_seq), 1).view(-1, *shape[2:]),
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-img_recon.png"),
                         nrow=T,
                         normalize=True,
@@ -480,6 +612,7 @@ def train(
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-vid_recon.mp4")
                     )
                     e_eval.train()
+                    posterior.train()
 
             if i % args.save_every == 0:
                 e_eval = encoder if args.no_ema else e_ema
@@ -498,7 +631,7 @@ def train(
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
                 )
             
-            if i % args.save_latest_every == 0:
+            if not args.debug and i % args.save_latest_every == 0:
                 torch.save(
                     {
                         "e": e_module.state_dict(),
@@ -553,6 +686,8 @@ if __name__ == "__main__":
     parser.add_argument("--frame_step", type=int, default=1)
     parser.add_argument("--factor_ckpt", type=str, default='factor.pt')
     parser.add_argument("--stddev_group", type=int, default=4)
+    parser.add_argument("--debug", type=str, default="")
+    parser.add_argument("--use_multi_head", action='store_true')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -672,6 +807,10 @@ if __name__ == "__main__":
         args.latent_full = args.latent
     else:
         raise NotImplementedError
+    if args.use_multi_head:
+        args.factor_dim_full = args.n_latent * args.factor_dim
+    else:
+        args.factor_dim_full = args.factor_dim
     args.n_mlp = 8
 
     args.start_iter = 0
@@ -734,16 +873,15 @@ if __name__ == "__main__":
         lr=args.lr * e_reg_ratio,
         betas=(0 ** e_reg_ratio, 0.99 ** e_reg_ratio),
     )
-    if not args.no_update_discriminator:
-        d_optim = optim.Adam(
-            discriminator.parameters(),
-            lr=args.lr * d_reg_ratio,
-            betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
-        )
+    d_optim = optim.Adam(
+        discriminator.parameters(),
+        lr=args.lr * d_reg_ratio,
+        betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
+    )
 
     # TODO
     from model import LSTMPosterior
-    posterior = LSTMPosterior(latent=args.latent, latent_full=args.latent_full, factor_dim=args.factor_dim,
+    posterior = LSTMPosterior(latent=args.latent, n_latent=args.n_latent, latent_full=args.latent_full, factor_dim=args.factor_dim_full,
                               conditional=args.use_conditional_posterior, concat=args.use_concat_posterior).to(device)
     prior = None
     discriminator3d = None
@@ -754,9 +892,13 @@ if __name__ == "__main__":
     if os.path.exists(args.factor_ckpt):
         ckpt = torch.load(args.factor_ckpt, map_location=lambda storage, loc: storage)
         factor = ckpt["eigvec"]  # [512, D]
-        if factor.shape[0] != args.latent_full:
+        if not args.use_multi_head and args.latent_full > args.latent:
             factor = factor.repeat(args.n_latent, 1)
-    factor = FactorModule(args.factor_dim, args.latent_full, weight=factor).to(device)
+    if args.use_multi_head:
+        factor = FactorModule(args.factor_dim_full, args.latent_full, weight=factor,
+                              n_head=args.n_latent).to(device)
+    else:
+        factor = FactorModule(args.factor_dim_full, args.latent_full, weight=factor).to(device)
     q_optim = optim.Adam(posterior.parameters(), lr=args.lr, betas=(0, 0.99))
     p_optim = None
     dv_optim = optim.Adam(discriminator3d.parameters(), lr=args.lr, betas=(0, 0.99))

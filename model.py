@@ -757,14 +757,19 @@ class Encoder(nn.Module):
 
 
 class LSTMPosterior(nn.Module):
-    def __init__(self, latent=512, latent_full=512, hidden_dim=512, factor_dim=512,
-                 bidirectional=True, conditional=True, concat=False):
+    def __init__(self, latent=512, n_latent=1, latent_full=512, hidden_dim=512, factor_dim=512,
+                 bidirectional=True, conditional=True, concat=False, multi_head=False,
+                 reshape_output=False):
         """
         input: latent sequence [N, T, latent]
-        output: f [N, latent]; z [N, T, D]
+        output: f [N, latent]; y [N, T, D]
+
+        single head: f [N, latent_full];      y [N, T, D]
+        multi head : f [N, n_latent, latent]; y [N, T, n_latent, d]
         """
         super(LSTMPosterior, self).__init__()
         self.latent = latent
+        self.n_latent = n_latent
         self.latent_full = latent_full
         self.hidden_dim = hidden_dim
         self.bidirectional = bidirectional
@@ -835,16 +840,38 @@ class LSTMPosterior(nn.Module):
         return f_out, y_out
 
 
-class LearnableMatrix(nn.Module):
-    def __init__(self, in_dim, out_dim, weight=None):
+class FactorModule(nn.Module):
+    def __init__(self, in_dim, out_dim, weight=None, n_head=1):
+        """
+        Divide input's in_dim into n_head parts, perform linear transformation
+        and concat results in out_dim.
+        """
         super().__init__()
+        self.n_head = n_head
+        self.in_dim_each = in_dim // n_head
+        self.out_dim_each = out_dim // n_head
+        self.weight = nn.ParameterList()
         if weight is None:
-            weight = torch.randn(out_dim, in_dim)
+            for i in range(n_head):
+                w = torch.randn(self.out_dim_each, self.in_dim_each)
+                self.weight.append(nn.Parameter(w))
         else:
-            assert(weight.shape[0] == out_dim and weight.shape[1] == in_dim)
-        self.weight = nn.Parameter(weight)
+            if weight.ndim == 2:
+                assert(weight.shape[0] == self.out_dim_each and weight.shape[1] == self.in_dim_each)
+                for i in range(n_head):
+                    self.weight.append(nn.Parameter(weight))
+            else:
+                for w in weight:
+                    assert(w.shape[0] == self.out_dim_each and w.shape[1] == self.in_dim_each)
+                    self.weight.append(nn.Parameter(w))
+        # self.weight = nn.Parameter(weight)
 
     def forward(self, input):
         # input [N, T, D] or [N, D]
-        out = F.linear(input, self.weight)
-        return out
+        inputs = torch.split(input, self.in_dim_each, input.ndim-1)
+        outputs = []
+        for i in range(self.n_head):
+            outputs.append(F.linear(inputs[i], self.weight[i]))
+        return torch.cat(outputs, input.ndim-1)
+
+

@@ -169,58 +169,45 @@ def reconstruct_sequence(args, x_seq, encoder, generator, factor, posterior, i=-
     N, T = shape[:2]
     latent_full = args.latent_full
     y_post = None
-    if args.debug == 'no_lstm':
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))
-        fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    elif args.debug == 'decomp':
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
-        f_post = real_lat[::T, ...]
-        z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
-        if args.use_multi_head:
-            y_post = []
-            for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
-                y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
-            y_post = torch.cat(y_post, 2)
-        else:
-            y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
-        z_post_hat = factor(y_post)
-        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        w_post = f_expand + z_post_hat
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    elif args.debug == 'coef':
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))
-        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        if i >= 0 and i % 10 == 0:
-            with torch.no_grad():
-                norm = y_post[:,1:,:].abs().max()
-            print(f"norm {norm.item()}")
-        dz = factor(y_post)
-        w_post = [f_post]
-        w_post_hat = real_lat.view(N, T, -1)
-        for t in range(1, T):
-            if args.use_residual:
-                w = 0.2*dz[:,t,:] + w_post_hat[:,t,:]
-            else:
-                w = 0.2*dz[:,t,:] + w_post[-1]
-            w_post.append(w)
-        w_post = torch.stack(w_post, 1)
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    else:
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))
-        # single head: f_post [N, latent_full]; y_post [N, T, D]
-        # multi head: f_post [N, n_latent, latent]; y_post [N, T, n_latent, d]
-        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        z_post = factor(y_post)
-        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        w_post = f_expand + z_post  # shape [N, T, latent_full]
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    if ret_y:
-        return fake_img, fake_seq, y_post
+    real_lat = encoder(x_seq.view(-1, *shape[2:]))
+    fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
+    fake_seq = fake_img.view(N, T, *shape[2:])
     return fake_img, fake_seq
+
+
+# def get_latent(f, z):
+#     # z is dw
+#     shape = list(z.shape)
+#     N, T = shape[:2]
+#     w = [f]
+#     for t in range(1, T):
+#         w.append(w[-1] + z[:,t,:])
+#     w = torch.stack(w, 1)
+#     return w
+
+
+def cross_reconstruction(args, x, encoder, generator, factor, posterior):
+    shape = list(x.shape)
+    N, T = shape[:2]
+    n = N//2
+    latent_full = args.latent_full
+    x1, x2 = x.chunk(2, dim=0)
+    w1 = encoder(x1.view(-1, *shape[2:])).view(n, T, -1)
+    w2 = encoder(x2.view(-1, *shape[2:])).view(n, T, -1)
+    f1 = w1[:,0,:]
+    z1 = w1 - f1.unsqueeze(1)
+    f2 = w2[:,0,:]
+    z2 = w2 - f2.unsqueeze(1)
+    fake_w1 = f1.unsqueeze(1) + z1
+    fake_w2 = f1.unsqueeze(1) + z2
+    fake_img1, _ = generator([fake_w1], input_is_latent=True, return_latents=False)
+    fake_img2, _ = generator([fake_w2], input_is_latent=True, return_latents=False)
+    # fake_x1 = fake_img1.view(n, T, *shape[2:])
+    # fake_x2 = fake_img2.view(n, T, *shape[2:])
+    return fake_img1, fake_img2
+    # fake_x = torch.cat((fake_x1, fake_x2), 0)  # [2n, T, ...]
+    # fake_img = torch.cat((fake_img1, fake_img2), 0)  # [2n*T, ...]
+    # return fake_img, fake_x
 
 
 def swap_sequence(args, x_seq, encoder, generator, factor, posterior, i=-1, ret_y=False):
@@ -228,76 +215,18 @@ def swap_sequence(args, x_seq, encoder, generator, factor, posterior, i=-1, ret_
     N, T = shape[:2]
     latent_full = args.latent_full
     y_post = None
-    if args.debug == 'no_lstm':
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))
-        fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    elif args.debug == 'decomp':
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
-        f_post = real_lat[::T, ...]
-        z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
-        if args.use_multi_head:
-            y_post = []
-            for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
-                y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
-            y_post = torch.cat(y_post, 2)
-        else:
-            y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
-        z_post_hat = factor(y_post)
-        #-- swap even and odd --#
-        f_post_A = f_post[np.arange(0, N, 2)]
-        f_post_B = f_post[np.arange(1, N, 2)]
-        f_post = torch.stack((f_post_B, f_post_A), dim=1).reshape(N, -1)
-        #-- swap even and odd --#
-        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        w_post = f_expand + z_post_hat
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    elif args.debug == 'coef':
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))
-        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        if i >= 0 and i % 10 == 0:
-            with torch.no_grad():
-                norm = y_post[:,1:,:].abs().max()
-            print(f"norm {norm.item()}")
-        dz = factor(y_post)
-        w_post = [f_post]
-        w_post_hat = real_lat.view(N, T, -1)
-        for t in range(1, T):
-            if args.use_residual:
-                w = 0.2*dz[:,t,:] + w_post_hat[:,t,:]
-            else:
-                w = 0.2*dz[:,t,:] + w_post[-1]
-            w_post.append(w)
-        w_post = torch.stack(w_post, 1)
-        f_post = w_post[:,0,:]
-        z_post = w_post - f_post.unsqueeze(1)
-        #-- swap even and odd --#
-        f_post_A = f_post[np.arange(0, N, 2)]
-        f_post_B = f_post[np.arange(1, N, 2)]
-        f_post = torch.stack((f_post_B, f_post_A), dim=1).reshape(N, -1)
-        #-- swap even and odd --#
-        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        w_post = f_expand + z_post
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    else:
-        real_lat = encoder(x_seq.view(-1, *shape[2:]))
-        # single head: f_post [N, latent_full]; y_post [N, T, D]
-        # multi head: f_post [N, n_latent, latent]; y_post [N, T, n_latent, d]
-        f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        z_post = factor(y_post)
-        #-- swap even and odd --#
-        f_post_A = f_post[np.arange(0, N, 2)]
-        f_post_B = f_post[np.arange(1, N, 2)]
-        f_post = torch.stack((f_post_B, f_post_A), dim=1).reshape(N, -1)
-        #-- swap even and odd --#
-        f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        w_post = f_expand + z_post  # shape [N, T, latent_full]
-        fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        fake_seq = fake_img.view(N, T, *shape[2:])
-    if ret_y:
-        return fake_img, fake_seq, y_post
+    real_lat = encoder(x_seq.view(-1, *shape[2:]))
+    f_post = real_lat[::T, ...]
+    z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
+    #-- swap even and odd --#
+    f_post_A = f_post[np.arange(0, N, 2)]
+    f_post_B = f_post[np.arange(1, N, 2)]
+    f_post = torch.stack((f_post_B, f_post_A), dim=1).reshape(N, -1)
+    #-- swap even and odd --#
+    f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
+    w_post = f_expand + z_post_hat
+    fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
+    fake_seq = fake_img.view(N, T, *shape[2:])
     return fake_img, fake_seq
 
 
@@ -407,40 +336,14 @@ def train(
 
         # TODO: real_seq -> encoder -> posterior -> generator -> fake_seq
         # f: [N, latent_full]; y: [N, T, D]
-        fake_img, fake_seq, y_post = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior, i, ret_y=True)
-        # if args.debug == 'no_lstm':
-        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
-        #     fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
-        #     fake_seq = fake_img.view(N, T, *shape[2:])
-        # elif args.debug == 'decomp':
-        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
-        #     f_post = real_lat[::T, ...]
-        #     z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
-        #     if args.use_multi_head:
-        #         y_post = []
-        #         for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
-        #             y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
-        #         y_post = torch.cat(y_post, 2)
-        #     else:
-        #         y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
-        #     z_post_hat = factor(y_post)
-        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        #     w_post = f_expand + z_post_hat
-        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        #     fake_seq = fake_img.view(N, T, *shape[2:])
-        # else:
-        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
-        #     # single head: f_post [N, latent_full]; y_post [N, T, D]
-        #     # multi head: f_post [N, n_latent, latent]; y_post [N, T, n_latent, d]
-        #     f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        #     z_post = factor(y_post)
-        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        #     w_post = f_expand + z_post  # shape [N, T, latent_full]
-        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        #     fake_seq = fake_img.view(N, T, *shape[2:])
+        # fake_img, fake_seq, y_post = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior, i, ret_y=True)
+        fake_img1, fake_img2 = cross_reconstruction(args, real_seq, encoder, generator, factor, posterior)
+        fake_img = torch.cat((fake_img1, fake_img2), 0)
+        fake_seq = fake_img.view(*shape)
 
         # TODO: sample frames
         real_img = real_seq.view(N*T, *shape[2:])
+        real_img1, real_img2 = real_img.chunk(2, dim=0)
         # fake_img = fake_seq.view(N*T, *shape[2:])
 
         if args.lambda_adv > 0:
@@ -453,11 +356,12 @@ def train(
 
         # TODO: do we always put pix and vgg loss for all frames?
         if args.lambda_pix > 0:
-            pix_loss = torch.mean((real_img - fake_img) ** 2)
+            pix_loss = torch.mean((real_img1 - fake_img1) ** 2)
+            # pix_loss = F.l1_loss(fake_img1, real_img1)
 
         if args.lambda_vgg > 0:
-            real_feat = vggnet(real_img)
-            fake_feat = vggnet(fake_img)
+            real_feat = vggnet(real_img1)
+            fake_feat = vggnet(fake_img1)
             vgg_loss = torch.mean((real_feat - fake_feat) ** 2)
         
         # Train Encoder with video-level objectives
@@ -466,9 +370,9 @@ def train(
             fake_pred = discriminator3d(flip_video(fake_seq.transpose(1, 2)))
             vid_loss = criterionGAN(fake_pred, True)
         
-        if args.lambda_l1y > 0:
-            # l1y_loss = criterionL1(y_post)
-            l1y_loss = torch.mean(torch.abs(y_post))
+        # if args.lambda_l1y > 0:
+        #     # l1y_loss = criterionL1(y_post)
+        #     l1y_loss = torch.mean(torch.abs(y_post))
 
         e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
         e_loss = e_loss + args.lambda_vid * vid_loss + args.lambda_l1y * l1y_loss
@@ -479,9 +383,9 @@ def train(
         
         if not args.no_update_encoder:
             encoder.zero_grad()
-        posterior.zero_grad()
+        # posterior.zero_grad()
         e_loss.backward()
-        q_optim.step()
+        # q_optim.step()
         if not args.no_update_encoder:
             e_optim.step()
 
@@ -520,46 +424,10 @@ def train(
         if args.toggle_grads:
             requires_grad(encoder, False)
             requires_grad(discriminator, True)
-        fake_img, fake_seq = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior)
-        # if args.debug == 'no_lstm':
-        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
-        #     fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
-        #     fake_seq = fake_img.view(N, T, *shape[2:])
-        # elif args.debug == 'decomp':
-        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
-        #     f_post = real_lat[::T, ...]
-        #     z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
-        #     if args.use_multi_head:
-        #         y_post = []
-        #         for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
-        #             y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
-        #         y_post = torch.cat(y_post, 2)
-        #     else:
-        #         y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
-        #     z_post_hat = factor(y_post)
-        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        #     w_post = f_expand + z_post_hat
-        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        #     fake_seq = fake_img.view(N, T, *shape[2:])
-        # elif args.debug == 'coef':
-        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))  # [N*T, latent_full]
-        #     f_post = real_lat[::T, ...]
-        #     z_post_hat = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
-        #     y_post = torch.mm(z_post_hat.view(N*T, -1), factor.weight).view(N, T, -1)
-        #     z_post = factor(y_post)
-        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        #     w_post = f_expand + z_post
-        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        #     fake_seq = fake_img.view(N, T, *shape[2:])
-        # else:
-        #     real_lat = encoder(real_seq.view(-1, *shape[2:]))
-        #     f_post, y_post = posterior(real_lat.view(N, T, latent_full))
-        #     z_post = factor(y_post)
-        #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-        #     w_post = f_expand + z_post  # shape [N, T, latent_full]
-        #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-        #     fake_seq = fake_img.view(N, T, *shape[2:])
-        # fake_img = fake_seq.view(N*T, *shape[2:])
+        # fake_img, fake_seq = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior)
+        fake_img1, fake_img2 = cross_reconstruction(args, real_seq, encoder, generator, factor, posterior)
+        fake_img = torch.cat((fake_img1, fake_img2), 0)
+        fake_seq = fake_img.view(*shape)
         if not args.no_update_discriminator:
             if args.lambda_adv > 0:
                 if args.augment:
@@ -661,34 +529,6 @@ def train(
                     posterior.eval()
                     # N = sample_x.shape[0]
                     fake_img, fake_seq = reconstruct_sequence(args, sample_x, e_eval, generator, factor, posterior)
-                    # if args.debug == 'no_lstm':
-                    #     real_lat = encoder(sample_x.view(-1, *shape[2:]))
-                    #     fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
-                    #     fake_seq = fake_img.view(N, T, *shape[2:])
-                    # elif args.debug == 'decomp':
-                    #     real_lat = encoder(sample_x.view(-1, *shape[2:]))  # [N*T, latent_full]
-                    #     f_post = real_lat[::T, ...]
-                    #     z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
-                    #     if args.use_multi_head:
-                    #         y_post = []
-                    #         for z, w in zip(torch.split(z_post, 512, 2), factor.weight):
-                    #             y_post.append(torch.mm(z.view(N*T, -1), w).view(N, T, -1))
-                    #         y_post = torch.cat(y_post, 2)
-                    #     else:
-                    #         y_post = torch.mm(z_post.view(N*T, -1), factor.weight[0]).view(N, T, -1)
-                    #     z_post_hat = factor(y_post)
-                    #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-                    #     w_post = f_expand + z_post_hat
-                    #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-                    #     fake_seq = fake_img.view(N, T, *shape[2:])
-                    # else:
-                    #     x_lat = encoder(sample_x.view(-1, *shape[2:]))
-                    #     f_post, y_post = posterior(x_lat.view(N, T, latent_full))
-                    #     z_post = factor(y_post)
-                    #     f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-                    #     w_post = f_expand + z_post
-                    #     fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-                    #     fake_seq = fake_img.view(N, T, *shape[2:])
                     utils.save_image(
                         torch.cat((sample_x, fake_seq), 1).view(-1, *shape[2:]),
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-img_recon.png"),

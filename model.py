@@ -875,3 +875,88 @@ class FactorModule(nn.Module):
         return torch.cat(outputs, input.ndim-1)
 
 
+class LSTMPosteriorDebug(nn.Module):
+    def __init__(self, latent=512, n_latent=1, latent_full=512, hidden_dim=512, factor_dim=512,
+                 bidirectional=True, conditional=True, concat=False, multi_head=False,
+                 reshape_output=False):
+        """
+        input: latent sequence [N, T, latent]
+        output: f [N, latent]; y [N, T, D]
+
+        single head: f [N, latent_full];      y [N, T, D]
+        multi head : f [N, n_latent, latent]; y [N, T, n_latent, d]
+        """
+        super(LSTMPosteriorDebug, self).__init__()
+        self.latent = latent
+        self.n_latent = n_latent
+        self.latent_full = latent_full
+        self.hidden_dim = hidden_dim
+        self.bidirectional = bidirectional
+        self.conditional = conditional
+        self.concat = concat
+        hidden_multiply = 2 if self.bidirectional else 1
+        # self.f_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        # TODO: use MLP?
+        # self.f_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, latent_full, lr_mul=0.01, activation="fused_lrelu"),
+        # )
+        gain = np.sqrt(2)
+        # self.f_mlp = nn.Sequential(
+        #     EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+        #     EqualizedLinear(hidden_dim, latent_full, gain=gain, lrmul=0.01, use_wscale=True),
+        # )
+        if conditional and concat:
+            self.y_lstm = nn.LSTM(self.latent_full+self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        else:
+            self.y_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        # TODO: use MLP? or skip?
+        # self.y_rnn = nn.RNN(hidden_multiply*hidden_dim, factor_dim, batch_first=True)
+        # self.y_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, factor_dim, lr_mul=0.01, activation="fused_lrelu"),
+        # )
+        self.y_mlp = nn.Sequential(
+            EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+            EqualizedLinear(hidden_dim, factor_dim, gain=gain, lrmul=0.01, use_wscale=True),
+        )
+    
+    def encode_f(self, z_in):
+        # z_in: [N, T, latent_full]
+        # lstm_out, _ = self.f_lstm(z_in)
+        # if self.bidirectional:
+        #     backward = lstm_out[:, 0, self.hidden_dim:]
+        #     frontal = lstm_out[:, -1, :self.hidden_dim]
+        #     lstm_out = torch.cat((frontal, backward), dim=1)
+        # else:
+        #     lstm_out = lstm_out[:, -1, :]
+        # f_out = self.f_mlp(lstm_out)
+        f_out = z_in[:, 0, :]
+        return f_out
+    
+    # def encode_y(self, z_in, f):
+    #     # z_in: [N, T, latent_full]; f: [N, latent_full]
+    #     # f_expand = f.unsqueeze(1).expand(-1, z_in.shape[1], -1)
+    #     lstm_out, _ = self.y_lstm(z_diff)
+    #     # y_out, _ = self.y_rnn(lstm_out)
+    #     # Note that EqualLinear cannot handle tensor of shape [N, T, D]
+    #     # y_skip = self.y_mlp(lstm_out.contiguous().view(z_in.shape[0]*z_in.shape[1], -1))
+    #     # y_out = y_out + y_skip.view(z_in.shape[0], z_in.shape[1], -1)
+    #     # y_out = y_out + self.y_mlp(lstm_out)
+    #     y_out = self.y_mlp(lstm_out)
+    #     return 0.2*y_out + z_diff
+
+    def encode_y(self, z_in, f):
+        lstm_out, _ = self.y_lstm(z_in)
+        y_out = self.y_mlp(lstm_out)
+        return y_out
+    
+    def forward(self, z_in):
+        # z_in [N, T, latent] or [N, T, n_latent, latent]
+        if z_in.ndim > 3:
+            z_in = z_in.reshape(z_in.size(0), z_in.size(1), -1)
+        f_out = self.encode_f(z_in)
+        y_out = self.encode_y(z_in, f_out)
+        return f_out, y_out
+
+

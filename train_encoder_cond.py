@@ -699,7 +699,7 @@ if __name__ == "__main__":
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
         ]
     )
-    dataset = VideoFolderDataset(args.path, transform, mode='pair', cache=args.cache)
+    dataset = VideoFolderDataset(args.path, transform, mode='nframe', nframe_num=2, cache=args.cache)
     if len(dataset) == 0:
         raise ValueError
     loader = data.DataLoader(

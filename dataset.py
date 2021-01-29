@@ -72,10 +72,10 @@ class VideoFolderDataset(Dataset):
         min_len=8,
         frame_num=8,
         frame_step=1,
-        nframe_num=3,  # Number of consecutive frames, when `mode`=='nframe'
+        nframe_num=2,  # Number of consecutive frames, when `mode`=='nframe'
         cache=None,
     ):
-        assert(mode in ['video', 'image', 'pair', 'nframe'])
+        assert(mode in ['video', 'image', 'nframe'])
         self.mode = mode
         self.root = dataroot
         self.cache = cache
@@ -118,8 +118,6 @@ class VideoFolderDataset(Dataset):
                                  'videos': self.videos,
                                  'lengths': self.lengths}, f)
         self.cumsum = np.cumsum([0] + self.lengths)
-        self.lengths1 = [i - 1 for i in self.lengths]
-        self.cumsum1 = np.cumsum([0] + self.lengths1)
         self.lengthsn = [i - nframe_num + 1 for i in self.lengths]
         self.cumsumn = np.cumsum([0] + self.lengthsn)
         print("Total numver of videos {}.".format(len(self.videos)))
@@ -128,10 +126,10 @@ class VideoFolderDataset(Dataset):
             self._dataset_length = len(self.videos)
         elif self.mode == 'image':
             self._dataset_length = np.sum(self.lengths)
-        elif self.mode == 'pair':
-            self._dataset_length = np.sum(self.lengths1)
-        else:  # self.mode == 'nframe'
+        elif self.mode == 'nframe':
             self._dataset_length = np.sum(self.lengthsn)
+        else:
+            raise NotImplementedError
 
     def _get_video(self, index):
         video_len = self.lengths[index]
@@ -157,22 +155,6 @@ class VideoFolderDataset(Dataset):
         frame = self.transform(frame)  # no ToTensor in transform
         return frame
 
-    def _get_pair(self, index):
-        if index == 0:
-            video_id = 0
-            frame_id = 0
-        else:
-            video_id = np.searchsorted(self.cumsum1, index) - 1
-            frame_id = index - self.cumsum1[video_id] - 1
-        frame1 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id]))
-        frame1 = F.to_tensor(frame1)
-        frame2 = Image.open(os.path.join(self.root, self.videos[video_id][frame_id + 1]))
-        frame2 = F.to_tensor(frame2)
-        # We should apply identical transforms to frame1 & frame2
-        frames = torch.stack([frame1, frame2], 0)
-        frames = self.transform(frames)
-        return frames.unbind(0)
-
     def _get_nframe(self, index):
         if index == 0:
             video_id = 0
@@ -193,10 +175,10 @@ class VideoFolderDataset(Dataset):
             return self._get_video(index)
         elif self.mode == 'image':
             return self._get_image(index)
-        elif self.mode == 'pair':
-            return self._get_pair(index)
-        else:  # mode == 'nframe'
+        elif self.mode == 'nframe':
             return self._get_nframe(index)
+        else:
+            return None
 
     def __len__(self):
         return self._dataset_length

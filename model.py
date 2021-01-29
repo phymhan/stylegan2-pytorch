@@ -709,6 +709,54 @@ class LatentDiscriminator(nn.Module):
         return out
 
 
+class LinearResBlock(nn.Module):
+    def __init__(self, latent_dim=512, n_mlp=2, use_residual=True):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.use_residual = use_residual
+        layers = []
+        for i in range(n_mlp):
+            layers.append(
+                EqualLinear(
+                    latent_dim, latent_dim, lr_mul=0.01, activation="fused_lrelu"
+                )
+            )
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, input):
+        out = self.layers(input)
+        if self.use_residual:
+            return (input + out) / math.sqrt(2)
+        else:
+            return out
+
+
+class LatentMLP(nn.Module):
+    def __init__(self, latent_dim=512, n_mlp=8, use_residual=False):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.use_residual = use_residual
+        n_layer_per_block = 2
+        layers = [PixelNorm()]
+
+        for i in range(n_mlp//n_layer_per_block):
+            layers.append(
+                LinearResBlock(
+                    latent_dim, n_layer_per_block, use_residual
+                )
+            )
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, input):
+        shape = input.shape
+        if shape[-1] > self.latent_dim:
+            out = self.layers(input.view(-1, self.latent_dim))
+            out = out.view(*shape)
+        else:
+            out = self.layers(input)
+        return out
+
+
 class Encoder(nn.Module):
     def __init__(
         self,

@@ -147,8 +147,8 @@ def reparameterize(z_mean, z_logvar):
     return z_mean + eps*std
 
 
-def train(args, loader, encoder, generator, discriminator, discriminator_z,
-          vggnet, pwcnet, e_optim, d_optim, dz_optim, e_ema, e_tf, device):
+def train(args, loader, encoder, generator, discriminator, discriminator_z, g1,
+          vggnet, pwcnet, e_optim, d_optim, dz_optim, g1_optim, e_ema, e_tf, device):
     mmd_eval = functools.partial(mix_rbf_mmd2, sigma_list=[2.0, 5.0, 10.0, 20.0, 40.0, 80.0])
 
     loader = sample_data(loader)
@@ -219,7 +219,10 @@ def train(args, loader, encoder, generator, discriminator, discriminator_z,
         latent_real, logvar = encoder(real_img)
         if args.reparameterization:
             latent_real = reparameterize(latent_real, logvar)
-        fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
+        if args.train_latent_mlp:
+            fake_img, _ = generator([g1(latent_real)], input_is_latent=True, return_latents=False)
+        else:
+            fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
 
         if args.lambda_adv > 0:
             if args.augment:
@@ -254,13 +257,20 @@ def train(args, loader, encoder, generator, discriminator, discriminator_z,
         
         if args.use_latent_teacher_forcing and args.lambda_etf > 0:
             w_tf, _ = e_tf(real_img)
-            w_pred = generator.get_latent(w_tf)
+            if args.train_latent_mlp:
+                w_pred = g1(latent_real)
+            else:
+                w_pred = generator.get_latent(latent_real)
             etf_z = torch.mean((w_tf - w_pred) ** 2)
             # print(etf_z)
         
         if args.train_on_fake and args.lambda_rec > 0:
             z_real = torch.randn(args.batch, args.latent_full, device=device)
-            fake_img, w_real = generator([z_real], input_is_latent=False, return_latents=True)
+            if args.train_latent_mlp:
+                fake_img, _ = generator([g1(z_real)], input_is_latent=True, return_latents=False)
+            else:
+                fake_img, _ = generator([z_real], input_is_latent=False, return_latents=False)
+            # fake_img, _ = generator([z_real], input_is_latent=False, return_latents=True)
             z_fake, z_logvar = encoder(fake_img)
             if args.reparameterization:
                 z_fake = reparameterize(z_fake, z_logvar)
@@ -276,9 +286,13 @@ def train(args, loader, encoder, generator, discriminator, discriminator_z,
         loss_dict["vgg"] = vgg_loss
         loss_dict["adv"] = adv_loss
 
+        if args.train_latent_mlp and g1 is not None:
+            g1.zero_grad()
         encoder.zero_grad()
         e_loss.backward()
         e_optim.step()
+        if args.train_latent_mlp and g1_optim is not None:
+            g1_optim.step()
 
         # if args.train_on_fake:
         #     e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
@@ -322,7 +336,10 @@ def train(args, loader, encoder, generator, discriminator, discriminator_z,
             latent_real, logvar = encoder(real_img)
             if args.reparameterization:
                 latent_real = reparameterize(latent_real, logvar)
-            fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
+            if args.train_latent_mlp:
+                fake_img, _ = generator([g1(latent_real)], input_is_latent=True, return_latents=False)
+            else:
+                fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
 
             if args.augment:
                 real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -396,7 +413,10 @@ def train(args, loader, encoder, generator, discriminator, discriminator_z,
             if i % args.log_every == 0:
                 with torch.no_grad():
                     latent_x, _ = e_ema(sample_x)
-                    fake_x, _ = generator([latent_x], input_is_latent=False, return_latents=False)
+                    if args.train_latent_mlp:
+                        fake_x, _ = generator([g1(latent_x)], input_is_latent=True, return_latents=False)
+                    else:
+                        fake_x, _ = generator([latent_x], input_is_latent=False, return_latents=False)
                     sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
@@ -427,7 +447,10 @@ def train(args, loader, encoder, generator, discriminator, discriminator_z,
                     nrow = int(args.n_sample ** 0.5)
                     nchw = list(sample_x.shape)[1:]
                     latent_real, _ = e_eval(sample_x)
-                    fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
+                    if args.train_latent_mlp:
+                        fake_img, _ = generator([g1(latent_real)], input_is_latent=True, return_latents=False)
+                    else:
+                        fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
                     sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
                     utils.save_image(
@@ -511,6 +534,8 @@ if __name__ == "__main__":
     parser.add_argument("--stddev_group", type=int, default=4)
     parser.add_argument("--use_latent_teacher_forcing", action='store_true')
     parser.add_argument("--etf_ckpt", type=str, default="etf.pt")
+    parser.add_argument("--train_latent_mlp", action='store_true')
+    parser.add_argument("--use_residual_latent_mlp", action='store_true')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -737,6 +762,16 @@ if __name__ == "__main__":
                 pass
             encoder.load_state_dict(ckpt["e"])
             e_optim.load_state_dict(ckpt["e_optim"])
+    
+    g1 = g1_optim = None
+    if args.train_latent_mlp:
+        from model import LatentMLP
+        g1 = LatentMLP(args.latent, use_residual=args.use_residual_latent_mlp).to(device)
+        g1_optim = optim.Adam(
+            g1.parameters(),
+            lr=args.lr * 1,
+            betas=(0 ** 1, 0.99 ** 1),
+        )
 
     if args.distributed:
         encoder = nn.parallel.DistributedDataParallel(
@@ -794,5 +829,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, encoder, g_ema, discriminator, discriminator_z,
-          vggnet, pwcnet, e_optim, d_optim, dz_optim, e_ema, e_tf, device)
+    train(args, loader, encoder, g_ema, discriminator, discriminator_z, g1,
+          vggnet, pwcnet, e_optim, d_optim, dz_optim, g1_optim, e_ema, e_tf, device)

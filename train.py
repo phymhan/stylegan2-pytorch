@@ -9,10 +9,12 @@ from torch import nn, autograd, optim
 from torch.nn import functional as F
 from torch.utils import data
 import torch.distributed as dist
-from torchvision import transforms, utils
+from torchvision import datasets, transforms, utils
 from PIL import Image
 from tqdm import tqdm
 import util
+import pdb
+st = pdb.set_trace
 
 try:
     import wandb
@@ -60,6 +62,13 @@ def sample_data(loader):
     # Endless iterator
     while True:
         for batch in loader:
+            yield batch
+
+
+def sample_data2(loader):
+    # Endless iterator
+    while True:
+        for batch, _ in loader:
             yield batch
 
 
@@ -125,7 +134,10 @@ def set_grad_none(model, targets):
 
 
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
-    loader = sample_data(loader)
+    if args.dataset == 'imagefolder':
+        loader = sample_data2(loader)
+    else:
+        loader = sample_data(loader)
 
     pbar = range(args.iter)
 
@@ -550,6 +562,17 @@ if __name__ == "__main__":
         dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
         if len(dataset) == 0:
             raise ValueError
+    elif args.dataset == 'imagefolder':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.Resize(args.size, Image.LANCZOS),
+                transforms.CenterCrop(args.size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
+        dataset = datasets.ImageFolder(args.path, transform=transform)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

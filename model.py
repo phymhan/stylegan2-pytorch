@@ -460,7 +460,15 @@ class Generator(nn.Module):
         return latent
 
     def get_latent(self, input):
-        return self.style(input)
+        if input.shape[1] > self.style_dim:
+            # input = torch.split(input, self.style_dim, dim=1)
+            # style = [self.style(s) for s in input]
+            # style = torch.cat(style, dim=1)
+            style = self.style(input.view(input.shape[0], -1, self.style_dim))
+            style = style.view(input.shape[0], -1)
+        else:
+            style = self.style(input)
+        return style
 
     def forward(
         self,
@@ -472,9 +480,20 @@ class Generator(nn.Module):
         input_is_latent=False,
         noise=None,
         randomize_noise=True,
+        stack_styles=False,
     ):
         if not input_is_latent:  # if `style' is z, then get w = self.style(z)
-            styles = [self.style(s) for s in styles]
+            if styles[0].shape[1] > self.style_dim:
+                # styles = torch.split(styles[0], self.style_dim, dim=1)
+                # styles = [self.style(s) for s in styles]
+                # styles = [torch.stack(styles, dim=1)]
+                styles = self.style(styles[0].view(styles[0].shape[0], -1, self.style_dim))
+                styles = [styles.view(styles.shape[0], -1)]
+            else:
+                styles = [self.style(s) for s in styles]
+        
+        if stack_styles:  # concat or stack styles along dim=1
+            styles = [torch.stack(styles, dim=1)]
 
         if noise is None:
             if randomize_noise:
@@ -666,6 +685,30 @@ class Discriminator(nn.Module):
         return out
 
 
+class LatentDiscriminator(nn.Module):
+    def __init__(self, latent_dim=512, n_mlp=8):
+        super().__init__()
+
+        layers = [PixelNorm()]
+
+        for i in range(n_mlp-1):
+            layers.append(
+                EqualLinear(
+                    latent_dim, latent_dim, lr_mul=0.01, activation="fused_lrelu"
+                )
+            )
+        layers.append(
+            EqualLinear(
+                latent_dim, 1, lr_mul=0.01, activation="fused_lrelu"
+            )
+        )
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, input):
+        out = self.layers(input)
+        return out
+
+
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -674,9 +717,10 @@ class Encoder(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         which_latent='w',
-        reshape_latent=True,
+        reshape_latent=False,
         stddev_group=4,
         stddev_feat=1,
+        reparameterization=False,
     ):
         """
         which_latent: 'w' predict different w for all blocks; 'w_shared' predict
@@ -705,6 +749,7 @@ class Encoder(nn.Module):
         self.which_latent = which_latent
         self.reshape_latent = reshape_latent
         self.style_dim = style_dim
+        self.reparameterization = reparameterization
 
         in_channel = channels[size]
 
@@ -731,6 +776,11 @@ class Encoder(nn.Module):
             EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
             EqualLinear(channels[4], out_channel),
         )
+        if reparameterization:
+            self.final_logvar = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+            EqualLinear(channels[4], out_channel),
+        )
 
     def forward(self, input):
         out = self.convs(input)
@@ -750,10 +800,13 @@ class Encoder(nn.Module):
         out = self.final_conv(out)
 
         out = out.view(batch, -1)
-        out = self.final_linear(out)
+        out_mean = self.final_linear(out)
+        if self.reparameterization:
+            out_logvar = self.final_logvar(out)
+            return out_mean, out_logvar
         if self.which_latent == 'w' and self.reshape_latent:
-            out = out.reshape(batch, self.n_latent, self.style_dim)
-        return out
+            out_mean = out_mean.reshape(batch, self.n_latent, self.style_dim)
+        return out_mean, None
 
 
 class LSTMPosterior(nn.Module):

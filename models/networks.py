@@ -687,7 +687,7 @@ class FrameEncoder(nn.Module):
         if self.reparam:
             self.head_logvar = nn.Conv2d(ndf * 8, dim_out, 1, 1, 0, bias=False)
 
-    def reparameterize(self, mean, logvar, rsample=True):
+    def reparameterization(self, mean, logvar, rsample=True):
         if not rsample:
             return mean
         eps = torch.randn_like(logvar)
@@ -704,7 +704,7 @@ class FrameEncoder(nn.Module):
         out = self.head(h)
         if self.reparam:
             logvar = self.head_logvar(h)
-            return out, logvar, self.reparameterize(out, logvar, self.training)
+            return out, logvar, self.reparameterization(out, logvar, self.training)
         return out
 
 
@@ -752,7 +752,7 @@ class ReparamHead(nn.Module):
             self.mean_head = nn.Linear(dim_in, dim_out)
             self.logvar_head = nn.Linear(dim_in, dim_out)
     
-    def reparameterize(self, mean, logvar):
+    def reparameterization(self, mean, logvar):
         eps = torch.randn_like(logvar)
         std = torch.exp(0.5 * logvar)
         z = mean + eps*std
@@ -764,7 +764,7 @@ class ReparamHead(nn.Module):
         z_mean = self.mean_head(feature)
         z_logvar = self.logvar_head(feature)
         if rsample:
-            return z_mean, z_logvar, self.reparameterize(z_mean, z_logvar)
+            return z_mean, z_logvar, self.reparameterization(z_mean, z_logvar)
         else:
             return z_mean, z_logvar, z_mean
 

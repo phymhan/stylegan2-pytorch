@@ -200,7 +200,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             requires_grad(encoder, True)
             requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
-        latent_real = encoder(real_img)
+        latent_real, _ = encoder(real_img)
         fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
 
         if args.lambda_adv > 0:
@@ -234,8 +234,8 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
             if e_regularize and args.lambda_rec > 0:
                 noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                fake_img, latent_fake = generator(noise, input_is_latent=False, return_latents=True)
-                latent_pred = encoder(fake_img)
+                fake_img, latent_fake = generator(noise, input_is_latent=True, return_latents=True)
+                latent_pred, _ = encoder(fake_img)
                 if latent_pred.ndim < 3:
                     latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
                 rec_loss = torch.mean((latent_fake - latent_pred) ** 2)
@@ -248,7 +248,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
         if e_regularize:
             # why not regularize on augmented real?
             real_img.requires_grad = True
-            real_pred = encoder(real_img)
+            real_pred, _ = encoder(real_img)
             r1_loss_e = d_r1_loss(real_pred, real_img)
 
             encoder.zero_grad()
@@ -265,7 +265,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             requires_grad(encoder, False)
             requires_grad(discriminator, True)
         if not args.no_update_discriminator and args.lambda_adv > 0:
-            latent_real = encoder(real_img)
+            latent_real, _ = encoder(real_img)
             fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
 
             if args.augment:
@@ -331,7 +331,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
 
             if i % args.log_every == 0:
                 with torch.no_grad():
-                    latent_x = e_ema(sample_x)
+                    latent_x, _ = e_ema(sample_x)
                     fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
                     sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
@@ -362,7 +362,7 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
                     e_eval.eval()
                     nrow = int(args.n_sample ** 0.5)
                     nchw = list(sample_x.shape)[1:]
-                    latent_real = e_eval(sample_x)
+                    latent_real, _ = e_eval(sample_x)
                     fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
                     sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)

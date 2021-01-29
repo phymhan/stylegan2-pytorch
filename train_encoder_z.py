@@ -13,6 +13,8 @@ from torchvision import transforms, utils
 from PIL import Image
 from tqdm import tqdm
 import util
+from mmd import mix_rbf_mmd2
+import functools
 import pdb
 st = pdb.set_trace
 
@@ -22,7 +24,7 @@ try:
 except ImportError:
     wandb = None
 
-from model import Generator, Discriminator, FactorModule
+from model import Generator, Discriminator, LatentDiscriminator
 from idinvert_pytorch.models.perceptual_model import VGG16
 from dataset import MultiResolutionDataset, VideoFolderDataset
 from distributed import (
@@ -131,7 +133,6 @@ def accumulate_batches(data_iter, num):
     samples = []
     while num > 0:
         data = next(data_iter)
-        data = data['frames']
         samples.append(data)
         num -= data.size(0)
     samples = torch.cat(samples, dim=0)
@@ -140,118 +141,17 @@ def accumulate_batches(data_iter, num):
     return samples
 
 
-def flip_video(x):
-    num = random.randint(0,1)
-    if num == 0:
-        return torch.flip(x,[2])
-    else:
-        return x
+def reparameterize(z_mean, z_logvar):
+    eps = torch.randn_like(z_logvar)
+    std = torch.exp(0.5*z_logvar)
+    return z_mean + eps*std
 
 
-def encode_sequence(x_seq, encoder, posterior):
-    # x_seq is a sequence of shape [N, T, C, H, W]
-    shape = x_seq.shape
-    x_lat = encoder(x_seq.view(-1, *shape[2:]))
-    f_post, y_post = posterior(x_lat.view(shape[0], shape[1], -1))
-    return f_post, y_post
+def train(args, loader, encoder, generator, discriminator, discriminator_z,
+          vggnet, pwcnet, e_optim, d_optim, dz_optim, e_ema, e_tf, device):
+    mmd_eval = functools.partial(mix_rbf_mmd2, sigma_list=[2.0, 5.0, 10.0, 20.0, 40.0, 80.0])
 
-
-def decode_sequence(f_post, z_post, generator):
-    N, T = z_post.shape[0], z_post.shape[1]
-    f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-    w_post = f_expand + z_post  # shape [N, T, latent_full]
-    x_img, _ = generator([w_post.view(N*T, -1)], input_is_latent=True, return_latents=False)
-    x_seq = x_img.view(z_post.shape[0], z_post.shape[1], *x_img.shape[1:])
-
-
-def reconstruct_sequence(args, x_seq, encoder, generator, factor, posterior, i=-1, ret_y=False):
-    shape = list(x_seq.shape)
-    N, T = shape[:2]
-    latent_full = args.latent_full
-    y_post = None
-    real_lat = encoder(x_seq.view(-1, *shape[2:]))
-    fake_img, _ = generator([real_lat], input_is_latent=True, return_latents=False)
-    fake_seq = fake_img.view(N, T, *shape[2:])
-    return fake_img, fake_seq
-
-
-# def get_latent(f, z):
-#     # z is dw
-#     shape = list(z.shape)
-#     N, T = shape[:2]
-#     w = [f]
-#     for t in range(1, T):
-#         w.append(w[-1] + z[:,t,:])
-#     w = torch.stack(w, 1)
-#     return w
-
-
-def cross_reconstruction(args, x, encoder, generator, factor, posterior):
-    shape = list(x.shape)
-    N, T = shape[:2]
-    n = N//2
-    latent_full = args.latent_full
-    x1, x2 = x.chunk(2, dim=0)
-    w1 = encoder(x1.view(-1, *shape[2:])).view(n, T, -1)
-    w2 = encoder(x2.view(-1, *shape[2:])).view(n, T, -1)
-    f1 = w1[:,0,:]
-    z1 = w1 - f1.unsqueeze(1)
-    f2 = w2[:,0,:]
-    z2 = w2 - f2.unsqueeze(1)
-    fake_w1 = f1.unsqueeze(1) + z1
-    fake_w2 = f1.unsqueeze(1) + z2
-    fake_img1, _ = generator([fake_w1.view(-1, latent_full)], input_is_latent=True, return_latents=False)
-    fake_img2, _ = generator([fake_w2.view(-1, latent_full)], input_is_latent=True, return_latents=False)
-    # fake_x1 = fake_img1.view(n, T, *shape[2:])
-    # fake_x2 = fake_img2.view(n, T, *shape[2:])
-    return fake_img1, fake_img2
-    # fake_x = torch.cat((fake_x1, fake_x2), 0)  # [2n, T, ...]
-    # fake_img = torch.cat((fake_img1, fake_img2), 0)  # [2n*T, ...]
-    # return fake_img, fake_x
-
-
-def swap_sequence(args, x_seq, encoder, generator, factor, posterior, i=-1, ret_y=False):
-    shape = list(x_seq.shape)
-    N, T = shape[:2]
-    latent_full = args.latent_full
-    y_post = None
-    real_lat = encoder(x_seq.view(-1, *shape[2:]))
-    f_post = real_lat[::T, ...]
-    z_post = real_lat.view(N, T, -1) - f_post.unsqueeze(1)
-    #-- swap even and odd --#
-    f_post_A = f_post[np.arange(0, N, 2)]
-    f_post_B = f_post[np.arange(1, N, 2)]
-    f_post = torch.stack((f_post_B, f_post_A), dim=1).reshape(N, -1)
-    #-- swap even and odd --#
-    f_expand = f_post.unsqueeze(1).expand(-1, T, -1)
-    w_post = f_expand + z_post
-    fake_img, _ = generator([w_post.view(N*T, latent_full)], input_is_latent=True, return_latents=False)
-    fake_seq = fake_img.view(N, T, *shape[2:])
-    return fake_img, fake_seq
-
-
-def train(
-    args,
-    loader,
-    encoder,
-    generator,
-    discriminator,
-    discriminator3d,  # video disctiminator
-    posterior,
-    prior,
-    factor,  # a learnable matrix
-    vggnet,
-    e_optim,
-    d_optim,
-    dv_optim,
-    q_optim,  # q for posterior
-    p_optim,  # p for prior
-    f_optim,  # f for factor
-    e_ema,
-    device
-):
     loader = sample_data(loader)
-
     pbar = range(args.iter)
 
     if get_rank() == 0:
@@ -268,6 +168,8 @@ def train(
                  "r1_d": torch.tensor(0., device=device),
                  "r1_e": torch.tensor(0., device=device),
                  "rec": torch.tensor(0., device=device),}
+    avg_pix_loss = util.AverageMeter()
+    avg_vgg_loss = util.AverageMeter()
 
     if args.distributed:
         e_module = encoder.module
@@ -282,34 +184,13 @@ def train(
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
 
-    latent_full = args.latent_full
-    factor_dim_full = args.factor_dim_full
-
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
     sample_x = accumulate_batches(loader, args.n_sample).to(device)
-    utils.save_image(
-        sample_x.view(-1, *list(sample_x.shape)[2:]),
-        os.path.join(args.log_dir, 'sample', f"real-img.png"),
-        nrow=sample_x.shape[1],
-        normalize=True,
-        range=(-1, 1),
-    )
-    util.save_video(
-        sample_x[0],
-        os.path.join(args.log_dir, 'sample', f"real-vid.mp4")
-    )
 
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
-    if args.no_update_encoder:
-        encoder = e_ema if e_ema is not None else encoder
-        requires_grad(encoder, False)
-        encoder.eval()
-    from models.networks_3d import GANLoss
-    criterionGAN = GANLoss()
-    # criterionL1 = nn.L1Loss()
 
     # if args.no_ema or e_ema is None:
     #     e_ema = encoder
@@ -321,30 +202,24 @@ def train(
             print("Done!")
             break
 
-        data = next(loader)
-        real_seq = data['frames']
-        real_seq = real_seq.to(device)  # [N, T, C, H, W]
-        shape = list(real_seq.shape)
-        N, T = shape[:2]
+        real_img = next(loader)
+        real_img = real_img.to(device)
 
-        # Train Encoder with frame-level objectives
+        batch = real_img.shape[0]
+
+        # Train Encoder
         if args.toggle_grads:
-            if not args.no_update_encoder:
-                requires_grad(encoder, True)
+            requires_grad(encoder, True)
             requires_grad(discriminator, False)
-        pix_loss = vgg_loss = adv_loss = rec_loss = vid_loss = l1y_loss = torch.tensor(0., device=device)
-
-        # TODO: real_seq -> encoder -> posterior -> generator -> fake_seq
-        # f: [N, latent_full]; y: [N, T, D]
-        # fake_img, fake_seq, y_post = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior, i, ret_y=True)
-        fake_img1, fake_img2 = cross_reconstruction(args, real_seq, encoder, generator, factor, posterior)
-        fake_img = torch.cat((fake_img1, fake_img2), 0)
-        fake_seq = fake_img.view(*shape)
-
-        # TODO: sample frames
-        real_img = real_seq.view(N*T, *shape[2:])
-        real_img1, real_img2 = real_img.chunk(2, dim=0)
-        # fake_img = fake_seq.view(N*T, *shape[2:])
+        pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
+        kld_z = torch.tensor(0., device=device)
+        mmd_z = torch.tensor(0., device=device)
+        gan_z = torch.tensor(0., device=device)
+        etf_z = torch.tensor(0., device=device)
+        latent_real, logvar = encoder(real_img)
+        if args.reparameterization:
+            latent_real = reparameterize(latent_real, logvar)
+        fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
 
         if args.lambda_adv > 0:
             if args.augment:
@@ -354,117 +229,127 @@ def train(
             fake_pred = discriminator(fake_img_aug)
             adv_loss = g_nonsaturating_loss(fake_pred)
 
-        # TODO: do we always put pix and vgg loss for all frames?
         if args.lambda_pix > 0:
-            if args.pix_loss == 'l2':
-                pix_loss = torch.mean((real_img1 - fake_img1) ** 2)
-            elif args.pix_loss == 'l1':
-                pix_loss = F.l1_loss(fake_img1, real_img1)
+            pix_loss = torch.mean((real_img - fake_img) ** 2)
 
         if args.lambda_vgg > 0:
-            real_feat = vggnet(real_img1)
-            fake_feat = vggnet(fake_img1)
+            real_feat = vggnet(real_img)
+            fake_feat = vggnet(fake_img)
             vgg_loss = torch.mean((real_feat - fake_feat) ** 2)
         
-        # Train Encoder with video-level objectives
-        # TODO: video adversarial loss
-        if args.lambda_vid > 0:
-            fake_pred = discriminator3d(flip_video(fake_seq.transpose(1, 2)))
-            vid_loss = criterionGAN(fake_pred, True)
+        if args.lambda_kld_z > 0:
+            z_mean = latent_real.view(batch, -1)
+            kld_z = -0.5*torch.sum(1. + logvar - z_mean.pow(2) - logvar.exp()) / batch
+            # print(kld_z)
         
-        # if args.lambda_l1y > 0:
-        #     # l1y_loss = criterionL1(y_post)
-        #     l1y_loss = torch.mean(torch.abs(y_post))
+        if args.lambda_mmd_z > 0:
+            z_real = torch.randn(batch, args.latent_full, device=device)
+            mmd_z = mmd_eval(latent_real, z_real)
+            # print(mmd_z)
+        
+        if args.lambda_gan_z > 0:
+            fake_pred = discriminator_z(latent_real)
+            gan_z = g_nonsaturating_loss(fake_pred)
+            # print(gan_z)
+        
+        if args.use_latent_teacher_forcing and args.lambda_etf > 0:
+            w_tf, _ = e_tf(real_img)
+            w_pred = generator.get_latent(w_tf)
+            etf_z = torch.mean((w_tf - w_pred) ** 2)
+            # print(etf_z)
+        
+        if args.train_on_fake and args.lambda_rec > 0:
+            z_real = torch.randn(args.batch, args.latent_full, device=device)
+            fake_img, w_real = generator([z_real], input_is_latent=False, return_latents=True)
+            z_fake, z_logvar = encoder(fake_img)
+            if args.reparameterization:
+                z_fake = reparameterize(z_fake, z_logvar)
+            rec_loss = torch.mean((z_real - z_fake) ** 2)
+            loss_dict["rec"] = rec_loss
+            # print(rec_loss)
 
         e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
-        e_loss = e_loss + args.lambda_vid * vid_loss + args.lambda_l1y * l1y_loss
+        e_loss = e_loss + args.lambda_kld_z*kld_z + args.lambda_mmd_z*mmd_z + args.lambda_gan_z*gan_z + args.lambda_etf*etf_z + rec_loss*args.lambda_rec
+
         loss_dict["e"] = e_loss
         loss_dict["pix"] = pix_loss
         loss_dict["vgg"] = vgg_loss
         loss_dict["adv"] = adv_loss
-        
-        if not args.no_update_encoder:
-            encoder.zero_grad()
-        # posterior.zero_grad()
+
+        encoder.zero_grad()
         e_loss.backward()
-        # q_optim.step()
-        if not args.no_update_encoder:
-            e_optim.step()
+        e_optim.step()
 
         # if args.train_on_fake:
         #     e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
         #     if e_regularize and args.lambda_rec > 0:
-        #         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        #         fake_img, latent_fake = generator(noise, input_is_latent=False, return_latents=True)
-        #         latent_pred = encoder(fake_img)
-        #         if latent_pred.ndim < 3:
-        #             latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
-        #         rec_loss = torch.mean((latent_fake - latent_pred) ** 2)
+        #         # noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        #         # fake_img, latent_fake = generator(noise, input_is_latent=False, return_latents=True)
+        #         z_real = torch.randn(args.batch, args.latent_full, device=device)
+        #         fake_img, w_real = generator([z_real], input_is_latent=False, return_latents=True)
+        #         z_fake, logvar = encoder(fake_img)
+        #         if args.reparameterization:
+        #             z_fake = reparameterize(z_fake, logvar)
+        #         rec_loss = torch.mean((z_real - z_fake) ** 2)
         #         encoder.zero_grad()
         #         (rec_loss * args.lambda_rec).backward()
         #         e_optim.step()
         #         loss_dict["rec"] = rec_loss
 
-        # e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
-        # if e_regularize:
-        #     # why not regularize on augmented real?
-        #     real_img.requires_grad = True
-        #     real_pred = encoder(real_img)
-        #     r1_loss_e = d_r1_loss(real_pred, real_img)
+        e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
+        if e_regularize:
+            # why not regularize on augmented real?
+            real_img.requires_grad = True
+            real_pred, logvar = encoder(real_img)
+            if args.reparameterization:
+                real_pred = reparameterize(real_pred, logvar)
+            r1_loss_e = d_r1_loss(real_pred, real_img)
 
-        #     encoder.zero_grad()
-        #     (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
-        #     e_optim.step()
+            encoder.zero_grad()
+            (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
+            e_optim.step()
 
-        #     loss_dict["r1_e"] = r1_loss_e
+            loss_dict["r1_e"] = r1_loss_e
 
-        if not args.no_update_encoder:
-            if not args.no_ema and e_ema is not None:
-                accumulate(e_ema, e_module, accum)
+        if not args.no_ema and e_ema is not None:
+            accumulate(e_ema, e_module, accum)
         
         # Train Discriminator
         if args.toggle_grads:
             requires_grad(encoder, False)
             requires_grad(discriminator, True)
-        # fake_img, fake_seq = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior)
-        fake_img1, fake_img2 = cross_reconstruction(args, real_seq, encoder, generator, factor, posterior)
-        fake_img = torch.cat((fake_img1, fake_img2), 0)
-        fake_seq = fake_img.view(*shape)
-        if not args.no_update_discriminator:
-            if args.lambda_adv > 0:
-                if args.augment:
-                    real_img_aug, _ = augment(real_img, ada_aug_p)
-                    fake_img_aug, _ = augment(fake_img, ada_aug_p)
-                else:
-                    real_img_aug = real_img
-                    fake_img_aug = fake_img
-                
-                fake_pred = discriminator(fake_img_aug)
-                real_pred = discriminator(real_img_aug)
-                d_loss = d_logistic_loss(real_pred, fake_pred)
+        if not args.no_update_discriminator and args.lambda_adv > 0:
+            latent_real, logvar = encoder(real_img)
+            if args.reparameterization:
+                latent_real = reparameterize(latent_real, logvar)
+            fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
 
-            # Train video discriminator
-            if args.lambda_vid > 0:
-                pred_real = discriminator3d(flip_video(real_seq.transpose(1, 2)))
-                pred_fake = discriminator3d(flip_video(fake_seq.transpose(1, 2)))
-                dv_loss_real = criterionGAN(pred_real, True)
-                dv_loss_fake = criterionGAN(pred_fake, False)
-                dv_loss = 0.5 * (dv_loss_real + dv_loss_fake)
-                d_loss = d_loss + dv_loss
+            if args.augment:
+                real_img_aug, _ = augment(real_img, ada_aug_p)
+                fake_img_aug, _ = augment(fake_img, ada_aug_p)
+            else:
+                real_img_aug = real_img
+                fake_img_aug = fake_img
+            
+            fake_pred = discriminator(fake_img_aug)
+            real_pred = discriminator(real_img_aug)
+            d_loss = d_logistic_loss(real_pred, fake_pred)
 
             loss_dict["d"] = d_loss
             loss_dict["real_score"] = real_pred.mean()
             loss_dict["fake_score"] = fake_pred.mean()
 
-            if args.lambda_adv > 0:
-                discriminator.zero_grad()
-            if args.lambda_vid > 0:
-                discriminator3d.zero_grad()
+            discriminator.zero_grad()
             d_loss.backward()
-            if args.lambda_adv > 0:
-                d_optim.step()
-            if args.lambda_vid > 0:
-                dv_optim.step()
+            d_optim.step()
+
+            z_real = torch.randn(batch, args.latent_full, device=device)
+            fake_pred = discriminator_z(latent_real.detach())
+            real_pred = discriminator_z(z_real)
+            d_loss_z = d_logistic_loss(real_pred, fake_pred)
+            discriminator_z.zero_grad()
+            d_loss_z.backward()
+            dz_optim.step()
 
             if args.augment and args.augment_p == 0:
                 ada_aug_p = ada_augment.tune(real_pred)
@@ -496,6 +381,8 @@ def train(
         rec_loss_val = loss_reduced["rec"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
+        avg_pix_loss.update(pix_loss_val, real_img.shape[0])
+        avg_vgg_loss.update(vgg_loss_val, real_img.shape[0])
 
         if get_rank() == 0:
             pbar.set_description(
@@ -505,6 +392,15 @@ def train(
                     f"rec: {rec_loss_val:.4f}; augment: {ada_aug_p:.4f}"
                 )
             )
+
+            if i % args.log_every == 0:
+                with torch.no_grad():
+                    latent_x, _ = e_ema(sample_x)
+                    fake_x, _ = generator([latent_x], input_is_latent=False, return_latents=False)
+                    sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
+                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                    f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
+                            f"ref: {sample_pix_loss.item()};\n")
 
             if wandb and args.wandb:
                 wandb.log(
@@ -528,30 +424,20 @@ def train(
                 with torch.no_grad():
                     e_eval = encoder if args.no_ema else e_ema
                     e_eval.eval()
-                    posterior.eval()
-                    # N = sample_x.shape[0]
-                    fake_img, fake_seq = reconstruct_sequence(args, sample_x, e_eval, generator, factor, posterior)
+                    nrow = int(args.n_sample ** 0.5)
+                    nchw = list(sample_x.shape)[1:]
+                    latent_real, _ = e_eval(sample_x)
+                    fake_img, _ = generator([latent_real], input_is_latent=False, return_latents=False)
+                    sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
+                                        fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
                     utils.save_image(
-                        torch.cat((sample_x, fake_seq), 1).view(-1, *shape[2:]),
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-img_recon.png"),
-                        nrow=T,
-                        normalize=True,
-                        range=(-1, 1),
-                    )
-                    util.save_video(
-                        fake_seq[random.randint(0, args.n_sample-1)],
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-vid_recon.mp4")
-                    )
-                    fake_img, fake_seq = swap_sequence(args, sample_x, e_eval, generator, factor, posterior)
-                    utils.save_image(
-                        torch.cat((sample_x, fake_seq), 1).view(-1, *shape[2:]),
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-img_swap.png"),
-                        nrow=T,
+                        sample.reshape(2*args.n_sample, *nchw),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
+                        nrow=nrow,
                         normalize=True,
                         range=(-1, 1),
                     )
                     e_eval.train()
-                    posterior.train()
 
             if i % args.save_every == 0:
                 e_eval = encoder if args.no_ema else e_ema
@@ -570,7 +456,7 @@ def train(
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
                 )
             
-            if not args.debug and i % args.save_latest_every == 0:
+            if i % args.save_latest_every == 0:
                 torch.save(
                     {
                         "e": e_module.state_dict(),
@@ -581,6 +467,7 @@ def train(
                         "d_optim": d_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
+                        "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"latest.pt"),
                 )
@@ -590,8 +477,9 @@ if __name__ == "__main__":
     device = "cuda"
 
     parser = argparse.ArgumentParser(description="StyleGAN2 encoder trainer")
-    parser.add_argument("--no_cuda", action='store_true')
+
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
+    parser.add_argument("--dataset", type=str, default='multires')
     parser.add_argument("--cache", type=str, default='local.db')
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
@@ -601,8 +489,6 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--no_update_discriminator", action='store_true')
     parser.add_argument("--no_load_discriminator", action='store_true')
-    parser.add_argument("--no_update_encoder", action='store_true')
-    parser.add_argument("--no_load_encoder", action='store_true')
     parser.add_argument("--toggle_grads", action='store_true')
     parser.add_argument("--use_optical_flow", action='store_true')
     parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
@@ -612,24 +498,19 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_vgg", type=float, default=5e-5)
     parser.add_argument("--lambda_adv", type=float, default=0.1)
-    parser.add_argument("--lambda_vid", type=float, default=0.1)
-    parser.add_argument("--lambda_l1y", type=float, default=0.)
     parser.add_argument("--lambda_rec", type=float, default=1.0, help="recon loss on style (w)")
+    parser.add_argument("--lambda_kld_z", type=float, default=0.)
+    parser.add_argument("--lambda_mmd_z", type=float, default=0.)
+    parser.add_argument("--lambda_gan_z", type=float, default=0.)
+    parser.add_argument("--lambda_etf", type=float, default=0.)
+    parser.add_argument("--reparameterization", action='store_true')
     parser.add_argument("--output_layer_idx", type=int, default=23)
-    parser.add_argument("--vgg_ckpt", type=str, default="vgg16.pth")
+    parser.add_argument("--vgg_ckpt", type=str, default="pretrained/vgg16.pth")
     parser.add_argument("--which_encoder", type=str, default='style')
     parser.add_argument("--which_latent", type=str, default='w_shared')
-    parser.add_argument("--use_conditional_posterior", action='store_true')
-    parser.add_argument("--use_concat_posterior", action='store_true')
-    parser.add_argument("--factor_dim", type=int, default=512)
-    parser.add_argument("--frame_num", type=int, default=50)
-    parser.add_argument("--frame_step", type=int, default=1)
-    parser.add_argument("--factor_ckpt", type=str, default='factor.pt')
     parser.add_argument("--stddev_group", type=int, default=4)
-    parser.add_argument("--debug", type=str, default="")
-    parser.add_argument("--use_multi_head", action='store_true')
-    parser.add_argument("--use_residual", action='store_true')
-    parser.add_argument("--pix_loss", type=str, default='l2')
+    parser.add_argument("--use_latent_teacher_forcing", action='store_true')
+    parser.add_argument("--etf_ckpt", type=str, default="etf.pt")
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -639,7 +520,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_sample",
         type=int,
-        default=8,
+        default=64,
         help="number of the samples generated during training",
     )
     parser.add_argument(
@@ -729,9 +610,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    util.seed_everything(0)
-    if args.no_cuda:
-        device = 'cpu'
+    util.seed_everything()
 
     n_gpu = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = n_gpu > 1
@@ -749,10 +628,6 @@ if __name__ == "__main__":
         args.latent_full = args.latent
     else:
         raise NotImplementedError
-    if args.use_multi_head:
-        args.factor_dim_full = args.n_latent * args.factor_dim
-    else:
-        args.factor_dim_full = args.factor_dim
     args.n_mlp = 8
 
     args.start_iter = 0
@@ -765,15 +640,16 @@ if __name__ == "__main__":
     vgg_ckpt = torch.load(args.vgg_ckpt, map_location=lambda storage, loc: storage)
     vggnet.load_state_dict(vgg_ckpt)
 
-    # pwcnet = None
-    # if args.use_optical_flow:
-    #     pwc = __import__('pytorch-pwc.run', globals(), locals(), ['Network'], 0)
-    #     pwcnet = pwc.Network().to(device)  # state_dict loaded in init
-    #     pwcnet.eval()
+    pwcnet = None
+    if args.use_optical_flow:
+        pwc = __import__('pytorch-pwc.run', globals(), locals(), ['Network'], 0)
+        pwcnet = pwc.Network().to(device)  # state_dict loaded in init
+        pwcnet.eval()
 
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier
     ).to(device)
+    discriminator_z = LatentDiscriminator(args.latent_full, 8).to(device)
     # generator = Generator(
     #     args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
     # ).to(device)
@@ -782,34 +658,43 @@ if __name__ == "__main__":
     ).to(device)
     g_ema.eval()
     # accumulate(g_ema, generator, 0)
-    reshape_latent = False
-
+    from model import Encoder
     e_ema = None
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=reshape_latent,
+            which_latent=args.which_latent,
             use_wscale=args.use_wscale).to(device)
         if not args.no_ema:
             e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-                which_latent=args.which_latent, reshape_latent=reshape_latent,
+                which_latent=args.which_latent,
                 use_wscale=args.use_wscale).to(device)
     else:
-        from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=reshape_latent, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, stddev_group=args.stddev_group,
+            reparameterization=args.reparameterization).to(device)
         if not args.no_ema:
             e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-                which_latent=args.which_latent, reshape_latent=reshape_latent, stddev_group=args.stddev_group).to(device)
+                which_latent=args.which_latent, stddev_group=args.stddev_group,
+                reparameterization=args.reparameterization).to(device)
     if not args.no_ema:
         e_ema.eval()
         accumulate(e_ema, encoder, 0)
+    
+    if args.use_latent_teacher_forcing:
+        # encoder that predicts w
+        e_tf = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+            which_latent=args.which_latent, stddev_group=args.stddev_group, reparameterization=False).to(device)
+        e_tf.eval()
+        ckpt = torch.load(args.etf_ckpt, map_location=lambda storage, loc: storage)
+        e_tf.load_state_dict(ckpt["e_ema"])
+    else:
+        e_tf = None
 
     # For lazy regularization (see paper appendix page 11)
     e_reg_ratio = args.e_reg_every / (args.e_reg_every + 1) if args.e_reg_every > 0 else 1.
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1) if args.d_reg_every > 0 else 1.
-    
-    e_optim = d_optim = None
+
     e_optim = optim.Adam(
         encoder.parameters(),
         lr=args.lr * e_reg_ratio,
@@ -820,31 +705,11 @@ if __name__ == "__main__":
         lr=args.lr * d_reg_ratio,
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
-
-    # TODO
-    from model import LSTMPosteriorDebug
-    posterior = LSTMPosteriorDebug(latent=args.latent, n_latent=args.n_latent, latent_full=args.latent_full, factor_dim=args.factor_dim_full,
-                              conditional=args.use_conditional_posterior, concat=args.use_concat_posterior).to(device)
-    prior = None
-    discriminator3d = None
-    factor = None
-    from models.networks import PatchVideoDiscriminator
-    discriminator3d = PatchVideoDiscriminator(3).to(device)
-    # TODO: use bolei's official sefa code?
-    if os.path.exists(args.factor_ckpt):
-        ckpt = torch.load(args.factor_ckpt, map_location=lambda storage, loc: storage)
-        factor = ckpt["eigvec"]  # [512, D]
-        if not args.use_multi_head and args.latent_full > args.latent:
-            factor = factor.repeat(args.n_latent, 1)
-    if args.use_multi_head:
-        factor = FactorModule(args.factor_dim_full, args.latent_full, weight=factor,
-                              n_head=args.n_latent).to(device)
-    else:
-        factor = FactorModule(args.factor_dim_full, args.latent_full, weight=factor).to(device)
-    q_optim = optim.Adam(posterior.parameters(), lr=args.lr, betas=(0, 0.99))
-    p_optim = None
-    dv_optim = optim.Adam(discriminator3d.parameters(), lr=args.lr, betas=(0, 0.99))
-    f_optim = None
+    dz_optim = optim.Adam(
+        discriminator_z.parameters(),
+        lr=args.lr,
+        betas=(0, 0.99),
+    )
 
     if args.ckpt is not None:
         print("load model:", args.ckpt)
@@ -860,12 +725,6 @@ if __name__ == "__main__":
         if not args.no_load_discriminator:
             discriminator.load_state_dict(ckpt["d"])
             d_optim.load_state_dict(ckpt["d_optim"])
-        
-        if not args.no_load_encoder:
-            encoder.load_state_dict(ckpt["e"])
-            e_optim.load_state_dict(ckpt["e_optim"])
-            if e_ema is not None and 'e_ema' in ckpt:
-                e_ema.load_state_dict(ckpt["e_ema"])
 
         if args.resume:
             try:
@@ -876,6 +735,8 @@ if __name__ == "__main__":
                     args.start_iter = int(os.path.splitext(ckpt_name)[0])
             except ValueError:
                 pass
+            encoder.load_state_dict(ckpt["e"])
+            e_optim.load_state_dict(ckpt["e_optim"])
 
     if args.distributed:
         encoder = nn.parallel.DistributedDataParallel(
@@ -891,38 +752,38 @@ if __name__ == "__main__":
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
-
-        posterior = nn.parallel.DistributedDataParallel(
-            posterior,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
-        discriminator3d = nn.parallel.DistributedDataParallel(
-            discriminator3d,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
-        factor = nn.parallel.DistributedDataParallel(
-            factor,
+        discriminator_z = nn.parallel.DistributedDataParallel(
+            discriminator_z,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
 
-    transform = transforms.Compose(
-        [
-            # transforms.ToTensor(),  # this should be done in loader
-            transforms.RandomHorizontalFlip(),
-            transforms.Resize(args.size),  # Image.LANCZOS
-            transforms.CenterCrop(args.size),
-            # transforms.ToTensor(),  # normally placed here
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-        ]
-    )
-    dataset = VideoFolderDataset(args.path, transform, mode='video', cache=args.cache,
-                                 frame_num=args.frame_num, frame_step=args.frame_step)
+    if args.dataset == 'multires':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
+        dataset = MultiResolutionDataset(args.path, transform, args.size)
+    elif args.dataset == 'videofolder':
+        # [Note] Potentially, same transforms will be applied to a batch of images,
+        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
+        transform = transforms.Compose(
+            [
+                # transforms.ToTensor(),  # this should be done in loader
+                transforms.RandomHorizontalFlip(),
+                transforms.Resize(args.size),  # Image.LANCZOS
+                transforms.CenterCrop(args.size),
+                # transforms.ToTensor(),  # normally placed here
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
+        dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
+        if len(dataset) == 0:
+            raise ValueError
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
@@ -933,5 +794,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, encoder, g_ema, discriminator, discriminator3d, posterior, prior, factor,
-          vggnet, e_optim, d_optim, dv_optim, q_optim, p_optim, f_optim, e_ema, device)
+    train(args, loader, encoder, g_ema, discriminator, discriminator_z,
+          vggnet, pwcnet, e_optim, d_optim, dz_optim, e_ema, e_tf, device)

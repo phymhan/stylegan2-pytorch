@@ -769,6 +769,7 @@ class Encoder(nn.Module):
         stddev_group=4,
         stddev_feat=1,
         reparameterization=False,
+        return_tuple=True,  # backward compatibility
     ):
         """
         which_latent: 'w' predict different w for all blocks; 'w_shared' predict
@@ -798,6 +799,7 @@ class Encoder(nn.Module):
         self.reshape_latent = reshape_latent
         self.style_dim = style_dim
         self.reparameterization = reparameterization
+        self.return_tuple = return_tuple
 
         in_channel = channels[size]
 
@@ -854,7 +856,9 @@ class Encoder(nn.Module):
             return out_mean, out_logvar
         if self.which_latent == 'w' and self.reshape_latent:
             out_mean = out_mean.reshape(batch, self.n_latent, self.style_dim)
-        return out_mean, None
+        if self.return_tuple:
+            return out_mean, None
+        return out_mean
 
 
 class LSTMPosterior(nn.Module):

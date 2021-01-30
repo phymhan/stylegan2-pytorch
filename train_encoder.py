@@ -641,7 +641,7 @@ if __name__ == "__main__":
         if args.resume:
             try:
                 ckpt_name = os.path.basename(args.ckpt)
-                if 'latest' in ckpt_name and 'iter' in ckpt:
+                if 'iter' in ckpt:
                     args.start_iter = ckpt["iter"]
                 else:
                     args.start_iter = int(os.path.splitext(ckpt_name)[0])

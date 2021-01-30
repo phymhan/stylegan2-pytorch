@@ -242,12 +242,14 @@ def train(
     factor,  # a learnable matrix
     vggnet,
     e_optim,
+    g_optim,
     d_optim,
     dv_optim,
     q_optim,  # q for posterior
     p_optim,  # p for prior
     f_optim,  # f for factor
     e_ema,
+    g_ema,
     device
 ):
     loader = sample_data(loader)
@@ -268,6 +270,8 @@ def train(
                  "r1_d": torch.tensor(0., device=device),
                  "r1_e": torch.tensor(0., device=device),
                  "rec": torch.tensor(0., device=device),}
+    if generator is None:  # args.update_generator == False
+        generator = g_ema
 
     if args.distributed:
         e_module = encoder.module
@@ -301,8 +305,10 @@ def train(
         os.path.join(args.log_dir, 'sample', f"real-vid.mp4")
     )
 
-    requires_grad(generator, False)  # always False
-    generator.eval()  # Generator should be ema and in eval mode
+    if not args.update_generator:
+        requires_grad(generator, False)  # always False
+        generator.eval()  # Generator should be ema and in eval mode
+    
     if args.no_update_encoder:
         encoder = e_ema if e_ema is not None else encoder
         requires_grad(encoder, False)
@@ -331,6 +337,8 @@ def train(
         if args.toggle_grads:
             if not args.no_update_encoder:
                 requires_grad(encoder, True)
+            if args.update_generator:
+                requires_grad(generator, True)
             requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = vid_loss = l1y_loss = torch.tensor(0., device=device)
 
@@ -353,6 +361,7 @@ def train(
                 fake_img_aug = fake_img
             fake_pred = discriminator(fake_img_aug)
             adv_loss = g_nonsaturating_loss(fake_pred)
+            # print(adv_loss)
 
         # TODO: do we always put pix and vgg loss for all frames?
         if args.lambda_pix > 0:
@@ -385,11 +394,16 @@ def train(
         
         if not args.no_update_encoder:
             encoder.zero_grad()
+        if args.update_generator:
+            generator.zero_grad()
         # posterior.zero_grad()
         e_loss.backward()
         # q_optim.step()
         if not args.no_update_encoder:
             e_optim.step()
+        if args.update_generator:
+            g_optim.step()
+            accumulate(g_ema, g_module, accum)
 
         # if args.train_on_fake:
         #     e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
@@ -425,6 +439,7 @@ def train(
         # Train Discriminator
         if args.toggle_grads:
             requires_grad(encoder, False)
+            requires_grad(generator, False)
             requires_grad(discriminator, True)
         # fake_img, fake_seq = reconstruct_sequence(args, real_seq, encoder, generator, factor, posterior)
         fake_img1, fake_img2 = cross_reconstruction(args, real_seq, encoder, generator, factor, posterior)
@@ -630,6 +645,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_multi_head", action='store_true')
     parser.add_argument("--use_residual", action='store_true')
     parser.add_argument("--pix_loss", type=str, default='l2')
+    parser.add_argument("--update_generator", action='store_true')
+    parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoints to resume training",
+    )
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -774,14 +792,24 @@ if __name__ == "__main__":
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier
     ).to(device)
-    # generator = Generator(
-    #     args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
-    # ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
     ).to(device)
     g_ema.eval()
-    # accumulate(g_ema, generator, 0)
+
+    generator = None
+    g_optim = None
+    if args.update_generator:
+        generator = Generator(
+            args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
+        ).to(device)
+        accumulate(g_ema, generator, 0)  # accumulate generator to g_ema=g_ema*0+g*1
+        g_reg_ratio = args.g_reg_every / (args.g_reg_every + 1) if args.g_reg_every > 0 else 1.
+        g_optim = optim.Adam(
+            generator.parameters(),
+            lr=args.lr * g_reg_ratio,
+            betas=(0 ** g_reg_ratio, 0.99 ** g_reg_ratio),
+        )
     reshape_latent = False
 
     e_ema = None
@@ -797,10 +825,12 @@ if __name__ == "__main__":
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=reshape_latent, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, reshape_latent=reshape_latent, stddev_group=args.stddev_group,
+            return_tuple=False).to(device)
         if not args.no_ema:
             e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-                which_latent=args.which_latent, reshape_latent=reshape_latent, stddev_group=args.stddev_group).to(device)
+                which_latent=args.which_latent, reshape_latent=reshape_latent, stddev_group=args.stddev_group,
+                return_tuple=False).to(device)
     if not args.no_ema:
         e_ema.eval()
         accumulate(e_ema, encoder, 0)
@@ -825,11 +855,14 @@ if __name__ == "__main__":
     from model import LSTMPosteriorDebug
     posterior = LSTMPosteriorDebug(latent=args.latent, n_latent=args.n_latent, latent_full=args.latent_full, factor_dim=args.factor_dim_full,
                               conditional=args.use_conditional_posterior, concat=args.use_concat_posterior).to(device)
-    prior = None
-    discriminator3d = None
+    q_optim = optim.Adam(posterior.parameters(), lr=args.lr, betas=(0, 0.99))
+    prior = p_optim = None
+    discriminator3d = dv_optim = None
     factor = None
-    from models.networks import PatchVideoDiscriminator
-    discriminator3d = PatchVideoDiscriminator(3).to(device)
+    if args.lambda_vid > 0:
+        from models.networks import PatchVideoDiscriminator
+        discriminator3d = PatchVideoDiscriminator(3).to(device)
+        dv_optim = optim.Adam(discriminator3d.parameters(), lr=args.lr, betas=(0, 0.99))
     # TODO: use bolei's official sefa code?
     if os.path.exists(args.factor_ckpt):
         ckpt = torch.load(args.factor_ckpt, map_location=lambda storage, loc: storage)
@@ -841,9 +874,6 @@ if __name__ == "__main__":
                               n_head=args.n_latent).to(device)
     else:
         factor = FactorModule(args.factor_dim_full, args.latent_full, weight=factor).to(device)
-    q_optim = optim.Adam(posterior.parameters(), lr=args.lr, betas=(0, 0.99))
-    p_optim = None
-    dv_optim = optim.Adam(discriminator3d.parameters(), lr=args.lr, betas=(0, 0.99))
     f_optim = None
 
     if args.ckpt is not None:
@@ -851,7 +881,11 @@ if __name__ == "__main__":
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
-        # generator.load_state_dict(ckpt["g"])
+        if args.update_generator:
+            # generator.load_state_dict(ckpt["g_ema"])
+            g_ckpt = torch.load(args.g_ckpt, map_location=lambda storage, loc: storage)
+            generator.load_state_dict(g_ckpt["g"])
+            g_optim.load_state_dict(g_ckpt["g_optim"])
         if 'g_ema' in ckpt:
             g_ema.load_state_dict(ckpt["g_ema"])
         else:
@@ -870,7 +904,7 @@ if __name__ == "__main__":
         if args.resume:
             try:
                 ckpt_name = os.path.basename(args.ckpt)
-                if 'latest' in ckpt_name and 'iter' in ckpt:
+                if 'iter' in ckpt:
                     args.start_iter = ckpt["iter"]
                 else:
                     args.start_iter = int(os.path.splitext(ckpt_name)[0])
@@ -898,12 +932,13 @@ if __name__ == "__main__":
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
-        discriminator3d = nn.parallel.DistributedDataParallel(
-            discriminator3d,
-            device_ids=[args.local_rank],
-            output_device=args.local_rank,
-            broadcast_buffers=False,
-        )
+        if discriminator3d is not None:
+            discriminator3d = nn.parallel.DistributedDataParallel(
+                discriminator3d,
+                device_ids=[args.local_rank],
+                output_device=args.local_rank,
+                broadcast_buffers=False,
+            )
         factor = nn.parallel.DistributedDataParallel(
             factor,
             device_ids=[args.local_rank],
@@ -933,5 +968,5 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, encoder, g_ema, discriminator, discriminator3d, posterior, prior, factor,
-          vggnet, e_optim, d_optim, dv_optim, q_optim, p_optim, f_optim, e_ema, device)
+    train(args, loader, encoder, generator, discriminator, discriminator3d, posterior, prior, factor,
+          vggnet, e_optim, g_optim, d_optim, dv_optim, q_optim, p_optim, f_optim, e_ema, g_ema, device)

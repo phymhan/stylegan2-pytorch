@@ -646,8 +646,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_residual", action='store_true')
     parser.add_argument("--pix_loss", type=str, default='l2')
     parser.add_argument("--update_generator", action='store_true')
-    parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoints to resume training",
-    )
+    parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoints to resume training")
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -693,7 +692,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--g_reg_every",
         type=int,
-        default=4,
+        default=0,
         help="interval of the applying path length regularization",
     )
     parser.add_argument(

@@ -757,6 +757,15 @@ class LatentMLP(nn.Module):
         return out
 
 
+class Identity(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.dummy = nn.Linear(1, 1, False)
+
+    def forward(self, input):
+        return input
+
+
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -1065,3 +1074,99 @@ class LSTMPosteriorDebug(nn.Module):
         return f_out, y_out
 
 
+class EncoderDebug(nn.Module):
+    def __init__(
+        self,
+        size,
+        style_dim=512,
+        channel_multiplier=2,
+        blur_kernel=[1, 3, 3, 1],
+        which_latent='w',
+        reshape_latent=False,
+        stddev_group=4,
+        stddev_feat=1,
+        reparameterization=False,
+        return_tuple=True,  # backward compatibility
+        n_mlp=8,
+        use_residual=False,
+    ):
+        """
+        which_latent: 'w' predict different w for all blocks; 'w_shared' predict
+          a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
+          'wb_shared' predict shared w and different biases.
+        """
+        super().__init__()
+
+        channels = {
+            4: 512,
+            8: 512,
+            16: 512,
+            32: 512,
+            64: 256 * channel_multiplier,
+            128: 128 * channel_multiplier,
+            256: 64 * channel_multiplier,
+            512: 32 * channel_multiplier,
+            1024: 16 * channel_multiplier,
+        }
+
+        convs = [ConvLayer(3, channels[size], 1)]
+
+        log_size = int(math.log(size, 2))
+        self.n_latent = log_size * 2 - 2  # copied from Generator
+        self.n_noises = (log_size - 2) * 2 + 1
+        self.which_latent = which_latent
+        self.reshape_latent = reshape_latent
+        self.style_dim = style_dim
+        self.reparameterization = reparameterization
+        self.return_tuple = return_tuple
+
+        in_channel = channels[size]
+
+        for i in range(log_size, 2, -1):
+            out_channel = channels[2 ** (i - 1)]
+
+            convs.append(ResBlock(in_channel, out_channel, blur_kernel))
+
+            in_channel = out_channel
+
+        self.convs = nn.Sequential(*convs)
+
+        self.stddev_group = stddev_group
+        self.stddev_feat = stddev_feat
+
+        self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
+        if self.which_latent == 'w':
+            out_channel = style_dim * self.n_latent
+        elif self.which_latent == 'w_shared':
+            out_channel = style_dim
+        else:
+            raise NotImplementedError
+        self.final_linear = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+            EqualLinear(channels[4], out_channel),
+        )
+        self.latent_mlp = LatentMLP(style_dim, n_mlp, use_residual)
+
+    def forward(self, input):
+        out = self.convs(input)
+        batch = out.shape[0]
+
+        if self.stddev_group > 1:
+            batch, channel, height, width = out.shape
+            group = min(batch, self.stddev_group)
+            stddev = out.view(
+                group, -1, self.stddev_feat, channel // self.stddev_feat, height, width
+            )
+            stddev = torch.sqrt(stddev.var(0, unbiased=False) + 1e-8)
+            stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
+            stddev = stddev.repeat(group, 1, height, width)
+            out = torch.cat([out, stddev], 1)
+
+        out = self.final_conv(out)
+
+        out = out.view(batch, -1)
+        out_mean = self.final_linear(out)
+        out_mean = self.latent_mlp(out_mean)
+        if self.return_tuple:
+            return out_mean, None
+        return out_mean

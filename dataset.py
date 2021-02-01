@@ -74,6 +74,7 @@ class VideoFolderDataset(Dataset):
         frame_step=1,
         nframe_num=2,  # Number of consecutive frames, when `mode`=='nframe'
         cache=None,
+        unbind=True,
     ):
         assert(mode in ['video', 'image', 'nframe'])
         self.mode = mode
@@ -86,6 +87,7 @@ class VideoFolderDataset(Dataset):
         self.nframe_num = nframe_num
         self.videos = []
         self.lengths = []
+        self.unbind = unbind
         
         if cache is not None and os.path.exists(cache):
             with open(cache, 'rb') as f:
@@ -168,7 +170,7 @@ class VideoFolderDataset(Dataset):
             frames.append(F.to_tensor(frame))
         frames = torch.stack(frames, 0)
         frames = self.transform(frames)
-        return frames.unbind(0)
+        return frames.unbind(0) if self.unbind else frames
 
     def __getitem__(self, index):
         if self.mode == 'video':

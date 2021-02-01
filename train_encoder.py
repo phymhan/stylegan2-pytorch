@@ -9,7 +9,7 @@ from torch import nn, autograd, optim
 from torch.nn import functional as F
 from torch.utils import data
 import torch.distributed as dist
-from torchvision import transforms, utils
+from torchvision import datasets, transforms, utils
 from PIL import Image
 from tqdm import tqdm
 import util
@@ -130,13 +130,27 @@ def set_grad_none(model, targets):
 def accumulate_batches(data_iter, num):
     samples = []
     while num > 0:
-        data = next(data_iter)
-        samples.append(data)
-        num -= data.size(0)
+        imgs = next(data_iter)
+        samples.append(imgs)
+        num -= imgs.size(0)
     samples = torch.cat(samples, dim=0)
     if num < 0:
         samples = samples[:num, ...]
     return samples
+
+
+def load_real_samples(args, data_iter):
+    if args.cache is not None:
+        npy_path = os.path.splitext(args.cache)[0] + f"_real_{args.n_sample}.npy"
+    else:
+        npy_path = None
+    if os.path.exists(npy_path):
+        sample_x = torch.from_numpy(np.load(npy_path)).to(args.device)
+    else:
+        sample_x = accumulate_batches(data_iter, args.n_sample)
+        if npy_path is not None:
+            np.save(npy_path, sample_x.cpu().numpy())
+    return sample_x
 
 
 def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device):
@@ -177,7 +191,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
-    sample_x = accumulate_batches(loader, args.n_sample).to(device)
+    # sample_x = accumulate_batches(loader, args.n_sample).to(device)
+    sample_x = load_real_samples(args, loader)
+    if sample_x.ndim > 4:
+        sample_x = sample_x[:,0,...]
 
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
@@ -212,7 +229,10 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
             adv_loss = g_nonsaturating_loss(fake_pred)
 
         if args.lambda_pix > 0:
-            pix_loss = torch.mean((real_img - fake_img) ** 2)
+            if args.pix_loss == 'l2':
+                pix_loss = torch.mean((fake_img - real_img) ** 2)
+            else:
+                pix_loss = F.l1_loss(fake_img, real_img)
 
         if args.lambda_vgg > 0:
             real_feat = vggnet(real_img)
@@ -244,18 +264,18 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
                 e_optim.step()
                 loss_dict["rec"] = rec_loss
 
-        e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
-        if e_regularize:
-            # why not regularize on augmented real?
-            real_img.requires_grad = True
-            real_pred, _ = encoder(real_img)
-            r1_loss_e = d_r1_loss(real_pred, real_img)
+        # e_regularize = args.e_reg_every > 0 and i % args.e_reg_every == 0
+        # if e_regularize:
+        #     # why not regularize on augmented real?
+        #     real_img.requires_grad = True
+        #     real_pred, _ = encoder(real_img)
+        #     r1_loss_e = d_r1_loss(real_pred, real_img)
 
-            encoder.zero_grad()
-            (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
-            e_optim.step()
+        #     encoder.zero_grad()
+        #     (args.r1 / 2 * r1_loss_e * args.e_reg_every + 0 * real_pred.view(-1)[0]).backward()
+        #     e_optim.step()
 
-            loss_dict["r1_e"] = r1_loss_e
+        #     loss_dict["r1_e"] = r1_loss_e
 
         if not args.no_ema and e_ema is not None:
             accumulate(e_ema, e_module, accum)
@@ -431,6 +451,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_ema", action='store_true', help="do not use ema if enabled")
     parser.add_argument("--train_on_fake", action='store_true', help="train encoder on fake?")
     parser.add_argument("--e_rec_every", type=int, default=1, help="interval of minimizing recon loss on w")
+    parser.add_argument("--pix_loss", type=str, default='l2')
     parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_vgg", type=float, default=5e-5)
     parser.add_argument("--lambda_adv", type=float, default=0.1)
@@ -440,6 +461,8 @@ if __name__ == "__main__":
     parser.add_argument("--which_encoder", type=str, default='style')
     parser.add_argument("--which_latent", type=str, default='w_shared')
     parser.add_argument("--stddev_group", type=int, default=4)
+    parser.add_argument("--use_residual_latent_mlp", action='store_true')
+    parser.add_argument("--n_latent_mlp", type=int, default=8)
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -597,6 +620,15 @@ if __name__ == "__main__":
             e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
                 which_latent=args.which_latent, reshape_latent=True,
                 use_wscale=args.use_wscale).to(device)
+    elif args.which_encoder == 'debug':
+        from model import EncoderDebug
+        encoder = EncoderDebug(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+            which_latent=args.which_latent, stddev_group=args.stddev_group,
+            n_mlp=args.n_latent_mlp, use_residual=args.use_residual_latent_mlp).to(device)
+        if not args.no_ema:
+            e_ema = EncoderDebug(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+                which_latent=args.which_latent, stddev_group=args.stddev_group,
+                n_mlp=args.n_latent_mlp, use_residual=args.use_residual_latent_mlp).to(device)
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
@@ -609,7 +641,8 @@ if __name__ == "__main__":
         accumulate(e_ema, encoder, 0)
 
     # For lazy regularization (see paper appendix page 11)
-    e_reg_ratio = args.e_reg_every / (args.e_reg_every + 1) if args.e_reg_every > 0 else 1.
+    # e_reg_ratio = args.e_reg_every / (args.e_reg_every + 1) if args.e_reg_every > 0 else 1.
+    e_reg_ratio = 1.
     d_reg_ratio = args.d_reg_every / (args.d_reg_every + 1) if args.d_reg_every > 0 else 1.
 
     e_optim = optim.Adam(
@@ -664,7 +697,7 @@ if __name__ == "__main__":
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
-
+    dataset = None
     if args.dataset == 'multires':
         transform = transforms.Compose(
             [
@@ -690,6 +723,17 @@ if __name__ == "__main__":
         dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
         if len(dataset) == 0:
             raise ValueError
+    elif args.dataset == 'imagefolder':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.Resize(args.size, Image.LANCZOS),
+                transforms.CenterCrop(args.size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
+        dataset = datasets.ImageFolder(args.path, transform=transform)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

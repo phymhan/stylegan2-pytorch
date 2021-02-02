@@ -147,7 +147,7 @@ def load_real_samples(args, data_iter):
     if os.path.exists(npy_path):
         sample_x = torch.from_numpy(np.load(npy_path)).to(args.device)
     else:
-        sample_x = accumulate_batches(data_iter, args.n_sample)
+        sample_x = accumulate_batches(data_iter, args.n_sample).to(args.device)
         if npy_path is not None:
             np.save(npy_path, sample_x.cpu().numpy())
     return sample_x
@@ -563,6 +563,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     util.seed_everything()
+    args.device = device
 
     n_gpu = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = n_gpu > 1

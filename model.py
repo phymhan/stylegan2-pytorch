@@ -460,12 +460,10 @@ class Generator(nn.Module):
         return latent
 
     def get_latent(self, input):
-        if input.shape[1] > self.style_dim:
-            # input = torch.split(input, self.style_dim, dim=1)
-            # style = [self.style(s) for s in input]
-            # style = torch.cat(style, dim=1)
-            style = self.style(input.view(input.shape[0], -1, self.style_dim))
-            style = style.view(input.shape[0], -1)
+        shape = input.shape
+        if shape[-1] > self.style_dim:
+            style = self.style(input.view(-1, self.style_dim))
+            style = style.view(*shape)
         else:
             style = self.style(input)
         return style
@@ -480,20 +478,9 @@ class Generator(nn.Module):
         input_is_latent=False,
         noise=None,
         randomize_noise=True,
-        stack_styles=False,
     ):
         if not input_is_latent:  # if `style' is z, then get w = self.style(z)
-            if styles[0].shape[1] > self.style_dim:
-                # styles = torch.split(styles[0], self.style_dim, dim=1)
-                # styles = [self.style(s) for s in styles]
-                # styles = [torch.stack(styles, dim=1)]
-                styles = self.style(styles[0].view(styles[0].shape[0], -1, self.style_dim))
-                styles = [styles.view(styles.shape[0], -1)]
-            else:
-                styles = [self.style(s) for s in styles]
-        
-        if stack_styles:  # concat or stack styles along dim=1
-            styles = [torch.stack(styles, dim=1)]
+            styles = [self.get_latent(s) for s in styles]
 
         if noise is None:
             if randomize_noise:
@@ -688,7 +675,7 @@ class Discriminator(nn.Module):
 class LatentDiscriminator(nn.Module):
     def __init__(self, latent_dim=512, n_mlp=8):
         super().__init__()
-
+        self.latent_dim = latent_dim
         layers = [PixelNorm()]
 
         for i in range(n_mlp-1):
@@ -705,6 +692,9 @@ class LatentDiscriminator(nn.Module):
         self.layers = nn.Sequential(*layers)
 
     def forward(self, input):
+        # input should be of shape [N, latent_dim]
+        if input.ndim > 2 or input.shape[1] > self.latent_dim:
+            input = input.view(-1, self.latent_dim)
         out = self.layers(input)
         return out
 
@@ -737,7 +727,8 @@ class LatentMLP(nn.Module):
         self.latent_dim = latent_dim
         self.use_residual = use_residual
         n_layer_per_block = 2
-        layers = [PixelNorm()]
+        # layers = [PixelNorm()]
+        layers = []
 
         for i in range(n_mlp//n_layer_per_block):
             layers.append(

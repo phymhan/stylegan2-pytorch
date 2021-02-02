@@ -132,6 +132,8 @@ wandb/
 *.lmdb/
 *.pkl
 
+data_vast
+logs_vast
 data
 checkpoints*
 sample
@@ -158,3 +160,7 @@ pretrained*
 
 .vscode
 .idea
+
+*.png
+*.jpg
+*.npy

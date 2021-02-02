@@ -154,37 +154,33 @@ def load_real_samples(args, data_iter):
     return sample_x
 
 
-def cross_reconstruction(encoder, generator, frames1, frames2, shuffle=True):
+def cross_reconstruction(encoder, generator, frames1, frames2, frames3):
     batch = frames1.shape[0]
-    if shuffle:
-        w1, _ = encoder(frames1)
-        w2, _ = encoder(frames2)
-        delta_w = w2 - w1
-        delta_w = delta_w[torch.randperm(batch),...]
-        # TODO: reconstruct frames2
-        x_recon, _ = generator([w2], input_is_latent=True, return_latents=False)
-        x_cross, _ = generator([w1 + delta_w], input_is_latent=True, return_latents=False)
-        fake_img = torch.cat((x_recon, x_cross), 0)
-        real_img = torch.cat((frames1, frames2), 0)
-        x_real = frames1
-    else:
-        real_img11, real_img21 = frames1.chunk(2, dim=0)
-        _, real_img22 = frames2.chunk(2, dim=0)
-        w11, _ = encoder(real_img11)
-        w21, _ = encoder(real_img21)
-        w22, _ = encoder(real_img22)
-        x_recon, _ = generator([w11], input_is_latent=True, return_latents=False)
-        x_cross, _ = generator([w11 + w22 - w21], input_is_latent=True, return_latents=False)
-        fake_img = torch.cat((x_recon, x_cross), 0)
-        real_img = frames1
-        x_real = real_img11
-    return real_img, fake_img, x_real, x_recon, x_cross
+    w1, _ = encoder(frames1)
+    w2, _ = encoder(frames2)
+    delta_w = w2 - w1
+    delta_w = delta_w[torch.randperm(batch),...]
+    x_recon, _ = generator([w2], input_is_latent=True, return_latents=False)
+    x_cross, _ = generator([w1 + delta_w], input_is_latent=True, return_latents=False)
+    # fake_img = torch.cat((x_recon, x_cross), 0)
+    # real_img = torch.cat((frames1, frames2), 0)
+    x_real = frames1
+    recon_pair = torch.cat((frames1, x_recon), 1)
+    cross_pair = torch.cat((frames1, x_cross), 1)
+    real2_pair = torch.cat((frames1, frames2), 1)
+    real3_pair = torch.cat((frames1, frames3), 1)
+    fake_pair = torch.cat((recon_pair, cross_pair), 0)
+    real_pair = torch.cat((real2_pair, real3_pair), 0)
+    # return real_img, fake_img, x_real, x_recon, x_cross
+    return real_pair, fake_pair, x_real, x_recon, x_cross
 
 
 def train(args, loader, encoder, generator, discriminator, discriminator_w,
           vggnet, pwcnet, e_optim, g_optim, g1_optim, d_optim, dw_optim,
           e_ema, g_ema, device):
     loader = sample_data(loader)
+    args.toggle_grads = True
+    args.augment = False
 
     pbar = range(args.iter)
 
@@ -229,8 +225,6 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
     sample_x2 = sample_x[:,-1,...]
     sample_idx = torch.randperm(args.n_sample)
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
-
-    args.toggle_grads = True
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -289,8 +283,15 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
         # batch = frames.shape[0]
         frames1 = frames[:,0,...]
         frames2 = frames[:,random.randint(1, args.nframe_num-1),...]
+        frames3 = frames[:,random.randint(1, args.nframe_num-1),...]
         frames1 = frames1.to(device)
         frames2 = frames2.to(device)
+        frames3 = frames3.to(device)
+        
+        # Conditional Discriminator:
+        #  real pair: [frame1, frame2]
+        # recon pair: [frame1, recon2]
+        # cross pair: [frame1, cross2]
 
         # Train Discriminator
         if args.toggle_grads:
@@ -299,7 +300,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
             requires_grad(discriminator, True)
             requires_grad(discriminator_w, True)
 
-        real_img, fake_img, _, _, _ = cross_reconstruction(encoder, generator, frames1, frames2, args.shuffle)
+        real_img, fake_img, _, _, _ = cross_reconstruction(encoder, generator, frames1, frames2, frames3)
 
         if args.augment:
             real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -370,7 +371,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
             requires_grad(discriminator_w, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
 
-        _, fake_img, x_real, x_recon, _ = cross_reconstruction(encoder, generator, frames1, frames2, args.shuffle)
+        _, fake_img, x_real, x_recon, _ = cross_reconstruction(encoder, generator, frames1, frames2, frames3)
 
         if args.lambda_adv > 0:
             if args.augment:

@@ -157,27 +157,30 @@ def load_real_samples(args, data_iter):
 def cross_reconstruction(encoder, generator, frames1, frames2, shuffle=True):
     batch = frames1.shape[0]
     if shuffle:
+        # real: [frame1, frame2]
+        # fake: [recon1, cross2]
         w1, _ = encoder(frames1)
         w2, _ = encoder(frames2)
         delta_w = w2 - w1
         delta_w = delta_w[torch.randperm(batch),...]
-        # TODO: reconstruct frames2
-        x_recon, _ = generator([w2], input_is_latent=True, return_latents=False)
+        x_recon, _ = generator([w1], input_is_latent=True, return_latents=False)
+        x_real = frames1
         x_cross, _ = generator([w1 + delta_w], input_is_latent=True, return_latents=False)
         fake_img = torch.cat((x_recon, x_cross), 0)
         real_img = torch.cat((frames1, frames2), 0)
-        x_real = frames1
     else:
+        # real: [frame11, frame21]
+        # fake: [recon11, cross12]
         real_img11, real_img21 = frames1.chunk(2, dim=0)
         _, real_img22 = frames2.chunk(2, dim=0)
         w11, _ = encoder(real_img11)
         w21, _ = encoder(real_img21)
         w22, _ = encoder(real_img22)
         x_recon, _ = generator([w11], input_is_latent=True, return_latents=False)
+        x_real = real_img11
         x_cross, _ = generator([w11 + w22 - w21], input_is_latent=True, return_latents=False)
         fake_img = torch.cat((x_recon, x_cross), 0)
         real_img = frames1
-        x_real = real_img11
     return real_img, fake_img, x_real, x_recon, x_cross
 
 
@@ -285,10 +288,11 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
             print("Done!")
             break
 
-        frames = next(loader)  # [N, T, C, H, W] 16 x 5 x 3 x 128 x 128
-        # batch = frames.shape[0]
+        frames = next(loader)  # [N, T, C, H, W]
+        batch = frames.shape[0]
         frames1 = frames[:,0,...]
-        frames2 = frames[:,random.randint(1, args.nframe_num-1),...]
+        # frames2 = frames[:,random.randint(1, args.nframe_num-1),...]
+        frames2 = frames[range(batch),torch.randint(1,args.nframe_num,(batch,)),...]
         frames1 = frames1.to(device)
         frames2 = frames2.to(device)
 
@@ -460,20 +464,6 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-        # if args.train_on_fake:
-        #     e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
-        #     if e_regularize and args.lambda_rec > 0:
-        #         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-        #         fake_img, latent_fake = generator(noise, input_is_latent=True, return_latents=True)
-        #         latent_pred, _ = encoder(fake_img)
-        #         if latent_pred.ndim < 3:
-        #             latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
-        #         rec_loss = torch.mean((latent_fake - latent_pred) ** 2)
-        #         encoder.zero_grad()
-        #         (rec_loss * args.lambda_rec).backward()
-        #         e_optim.step()
-        #         loss_dict["rec"] = rec_loss
-
         accumulate(e_ema, e_module, accum)
         accumulate(g_ema, g_module, accum)
 
@@ -530,50 +520,50 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
                     }
                 )
 
-            # if i % args.log_every == 0:
-            #     with torch.no_grad():
-            #         e_eval = e_ema
-            #         e_eval.eval()
-            #         g_ema.eval()
-            #         nrow = int(args.n_sample ** 0.5)
-            #         nchw = list(sample_x1.shape)[1:]
-            #         # Recon
-            #         latent_real, _ = e_eval(sample_x1)
-            #         fake_img, _ = g_ema([latent_real], input_is_latent=True, return_latents=False)
-            #         sample = torch.cat((sample_x1.reshape(args.n_sample//nrow, nrow, *nchw), 
-            #                             fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
-            #         utils.save_image(
-            #             sample.reshape(2*args.n_sample, *nchw),
-            #             os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
-            #             nrow=nrow,
-            #             normalize=True,
-            #             range=(-1, 1),
-            #         )
-            #         # Cross
-            #         w1, _ = e_eval(sample_x1)
-            #         w2, _ = e_eval(sample_x2)
-            #         delta_w = w2 - w1
-            #         delta_w = delta_w[sample_idx,...]
-            #         fake_img, _ = g_ema([w1 + delta_w], input_is_latent=True, return_latents=False)
-            #         sample = torch.cat((sample_x2.reshape(args.n_sample//nrow, nrow, *nchw), 
-            #                             fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
-            #         utils.save_image(
-            #             sample.reshape(2*args.n_sample, *nchw),
-            #             os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
-            #             nrow=nrow,
-            #             normalize=True,
-            #             range=(-1, 1),
-            #         )
-            #         # Sample
-            #         sample, _ = g_ema([sample_z])
-            #         utils.save_image(
-            #             sample,
-            #             os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
-            #             nrow=nrow,
-            #             normalize=True,
-            #             range=(-1, 1),
-            #         )
-            #     e_eval.train()
+            if False and i % args.log_every == 0:
+                with torch.no_grad():
+                    e_eval = e_ema
+                    e_eval.eval()
+                    g_ema.eval()
+                    nrow = int(args.n_sample ** 0.5)
+                    nchw = list(sample_x1.shape)[1:]
+                    # Recon
+                    latent_real, _ = e_eval(sample_x1)
+                    fake_img, _ = g_ema([latent_real], input_is_latent=True, return_latents=False)
+                    sample = torch.cat((sample_x1.reshape(args.n_sample//nrow, nrow, *nchw), 
+                                        fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    utils.save_image(
+                        sample.reshape(2*args.n_sample, *nchw),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
+                        nrow=nrow,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+                    # Cross
+                    w1, _ = e_eval(sample_x1)
+                    w2, _ = e_eval(sample_x2)
+                    delta_w = w2 - w1
+                    delta_w = delta_w[sample_idx,...]
+                    fake_img, _ = g_ema([w1 + delta_w], input_is_latent=True, return_latents=False)
+                    sample = torch.cat((sample_x2.reshape(args.n_sample//nrow, nrow, *nchw), 
+                                        fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    utils.save_image(
+                        sample.reshape(2*args.n_sample, *nchw),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
+                        nrow=nrow,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+                    # Sample
+                    sample, _ = g_ema([sample_z])
+                    utils.save_image(
+                        sample,
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
+                        nrow=nrow,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+                e_eval.train()
 
             if i % args.save_every == 0:
                 e_eval = e_ema
@@ -651,7 +641,7 @@ if __name__ == "__main__":
     parser.add_argument("--shuffle", action='store_true')
     parser.add_argument("--learned_prior", action='store_true', help="learned latent prior (w)?")
     parser.add_argument("--no_sim_opt", action='store_true')
-    parser.add_argument("--which_discriminator", type=str, default='default', choices=['default', 'cond', 'pac'])
+    parser.add_argument("--train_from_scratch", action='store_true')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -806,12 +796,7 @@ if __name__ == "__main__":
     #     pwcnet = pwc.Network().to(device)  # state_dict loaded in init
     #     pwcnet.eval()
 
-    if args.which_discriminator == 'cond':
-        in_channel = 6
-    elif args.which_discriminator == 'pac':
-        in_channel = 6
-    else:
-        in_channel = 3
+    in_channel = 3
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier, in_channel=in_channel,
     ).to(device)
@@ -897,7 +882,7 @@ if __name__ == "__main__":
         e_optim.load_state_dict(ckpt["e_optim"])
         g_optim.load_state_dict(ckpt["g_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
-    else:
+    elif not args.train_from_scratch:
         # if e_ckpt is provided, load encoder as warm start, else train encoder from scratch
         # if g_ckpt is provided, load generator as warm start, else train generator from scratch
         if args.e_ckpt is not None:

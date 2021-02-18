@@ -66,7 +66,7 @@ def sample_data(loader):
 
 
 def sample_data2(loader):
-    # Endless iterator
+    # image and label pair
     while True:
         for batch, _ in loader:
             yield batch
@@ -133,7 +133,34 @@ def set_grad_none(model, targets):
             p.grad = None
 
 
-def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
+def accumulate_batches(data_iter, num):
+    samples = []
+    while num > 0:
+        imgs = next(data_iter)
+        samples.append(imgs)
+        num -= imgs.size(0)
+    samples = torch.cat(samples, dim=0)
+    if num < 0:
+        samples = samples[:num, ...]
+    return samples
+
+
+def load_real_samples(args, data_iter):
+    # if args.cache is not None:
+    #     npy_path = os.path.splitext(args.cache)[0] + f"_real_{args.n_sample}.npy"
+    # else:
+    #     npy_path = None
+    npy_path = args.sample_cache
+    if npy_path is not None and os.path.exists(npy_path):
+        sample_x = torch.from_numpy(np.load(npy_path)).to(args.device)
+    else:
+        sample_x = accumulate_batches(data_iter, args.n_sample).to(args.device)
+        if npy_path is not None:
+            np.save(npy_path, sample_x.cpu().numpy())
+    return sample_x
+
+
+def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_optim, d_optim, g_ema, e_ema, device):
     if args.dataset == 'imagefolder':
         loader = sample_data2(loader)
     else:
@@ -153,13 +180,17 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
     path_lengths = torch.tensor(0.0, device=device)
     mean_path_length_avg = 0
     loss_dict = {}
+    avg_pix_loss = util.AverageMeter()
+    avg_vgg_loss = util.AverageMeter()
 
     if args.distributed:
         g_module = generator.module
+        e_module = encoder.module
         d_module = discriminator.module
 
     else:
         g_module = generator
+        e_module = encoder
         d_module = discriminator
 
     accum = 0.5 ** (32 / (10 * 1000))
@@ -170,6 +201,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
+    sample_x = load_real_samples(args, loader)
+    if sample_x.ndim > 4:
+        sample_x = sample_x[:,0,...]
 
     for idx in pbar:
         i = idx + args.start_iter
@@ -182,7 +216,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_img = next(loader)
         real_img = real_img.to(device)
 
+        # Train Discriminator
         requires_grad(generator, False)
+        requires_grad(encoder, False)
         requires_grad(discriminator, True)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
@@ -202,6 +238,20 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["d"] = d_loss
         loss_dict["real_score"] = real_pred.mean()
         loss_dict["fake_score"] = fake_pred.mean()
+
+        latent_real, _ = encoder(real_img)
+        rec_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+
+        if args.augment:
+            rec_img_aug, _ = augment(rec_img, ada_aug_p)
+        else:
+            rec_img_aug = rec_img
+        
+        rec_pred = discriminator(rec_img_aug)
+        d_loss_rec = F.softplus(rec_pred).mean()
+        d_loss = d_loss + d_loss_rec
+
+        loss_dict["rec_score"] = rec_pred.mean()
 
         discriminator.zero_grad()
         d_loss.backward()
@@ -225,6 +275,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         loss_dict["r1"] = r1_loss
 
+        # Train Generator
         requires_grad(generator, True)
         requires_grad(discriminator, False)
 
@@ -271,6 +322,47 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
+        # Train Encoder
+        requires_grad(encoder, True)
+        requires_grad(discriminator, False)
+        requires_grad(generator, args.train_generator)
+        pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
+        latent_real, _ = encoder(real_img)
+        rec_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+
+        if args.lambda_adv > 0:
+            if args.augment:
+                rec_img_aug, _ = augment(rec_img, ada_aug_p)
+            else:
+                rec_img_aug = rec_img
+            rec_pred = discriminator(rec_img_aug)
+            adv_loss = g_nonsaturating_loss(rec_pred)
+
+        if args.lambda_pix > 0:
+            if args.pix_loss == 'l2':
+                pix_loss = torch.mean((rec_img - real_img) ** 2)
+            else:
+                pix_loss = F.l1_loss(rec_img, real_img)
+
+        if args.lambda_vgg > 0:
+            vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
+        
+        e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
+        
+        loss_dict["e"] = e_loss
+        loss_dict["pix"] = pix_loss
+        loss_dict["vgg"] = vgg_loss
+        loss_dict["adv"] = adv_loss
+
+        encoder.zero_grad()
+        if args.train_generator:
+            generator.zero_grad()
+        e_loss.backward()
+        e_optim.step()
+        if args.train_generator:
+            g_optim.step()
+
+        accumulate(e_ema, e_module, accum)
         accumulate(g_ema, g_module, accum)
 
         loss_reduced = reduce_loss_dict(loss_dict)
@@ -282,15 +374,30 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
+        pix_loss_val = loss_reduced["pix"].mean().item()
+        vgg_loss_val = loss_reduced["vgg"].mean().item()
+        adv_loss_val = loss_reduced["adv"].mean().item()
+        avg_pix_loss.update(pix_loss_val, real_img.shape[0])
+        avg_vgg_loss.update(vgg_loss_val, real_img.shape[0])
 
         if get_rank() == 0:
             pbar.set_description(
                 (
                     f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
                     f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
-                    f"augment: {ada_aug_p:.4f}"
+                    f"augment: {ada_aug_p:.4f}; "
+                    f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}"
                 )
             )
+
+            if i % args.log_every == 0:
+                with torch.no_grad():
+                    latent_x, _ = e_ema(sample_x)
+                    fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
+                    sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
+                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                    f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
+                            f"ref: {sample_pix_loss.item()};\n")
 
             if wandb and args.wandb:
                 wandb.log(
@@ -310,12 +417,28 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
             if i % args.log_every == 0:
                 with torch.no_grad():
+                    # Fixed fake samples
                     g_ema.eval()
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
                         sample,
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=int(args.n_sample ** 0.5),
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+                    # Reconstruction samples
+                    e_ema.eval()
+                    nrow = int(args.n_sample ** 0.5)
+                    nchw = list(sample_x.shape)[1:]
+                    latent_real, _ = e_ema(sample_x)
+                    fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+                    sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
+                                        fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    utils.save_image(
+                        sample.reshape(2*args.n_sample, *nchw),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
+                        nrow=nrow,
                         normalize=True,
                         range=(-1, 1),
                     )
@@ -324,9 +447,12 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 torch.save(
                     {
                         "g": g_module.state_dict(),
+                        "e": e_module.state_dict(),
                         "d": d_module.state_dict(),
                         "g_ema": g_ema.state_dict(),
+                        "e_ema": e_ema.state_dict(),
                         "g_optim": g_optim.state_dict(),
+                        "e_optim": e_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
@@ -339,9 +465,12 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 torch.save(
                     {
                         "g": g_module.state_dict(),
+                        "e": e_module.state_dict(),
                         "d": d_module.state_dict(),
                         "g_ema": g_ema.state_dict(),
+                        "e_ema": e_ema.state_dict(),
                         "g_optim": g_optim.state_dict(),
+                        "e_optim": e_optim.state_dict(),
                         "d_optim": d_optim.state_dict(),
                         "args": args,
                         "ada_aug_p": ada_aug_p,
@@ -358,7 +487,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
     parser.add_argument("--dataset", type=str, default='multires')
-    parser.add_argument("--cache", type=str, default='local.db')
+    parser.add_argument("--cache", type=str, default=None)
+    parser.add_argument("--sample_cache", type=str, default=None)
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
@@ -455,9 +585,22 @@ if __name__ == "__main__":
         default=256,
         help="probability update interval of the adaptive augmentation",
     )
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--which_encoder", type=str, default='style')
+    parser.add_argument("--which_latent", type=str, default='w_shared')
+    parser.add_argument("--stddev_group", type=int, default=1)
+    parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
+    parser.add_argument("--vgg_ckpt", type=str, default="vgg16.pth")
+    parser.add_argument("--output_layer_idx", type=int, default=23)
+    parser.add_argument("--lambda_vgg", type=float, default=5e-5)
+    parser.add_argument("--lambda_adv", type=float, default=0.1)
+    parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
+    parser.add_argument("--pix_loss", type=str, default='l2')
+    parser.add_argument("--train_generator", action='store_true', help="update generator with encoder")
 
     args = parser.parse_args()
     util.seed_everything()
+    args.device = device
 
     n_gpu = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = n_gpu > 1
@@ -500,6 +643,36 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
+    # Define Encoder
+    if args.which_encoder == 'idinvert':
+        from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
+        encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
+            which_latent=args.which_latent, reshape_latent=True,
+            use_wscale=args.use_wscale).to(device)
+        e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
+            which_latent=args.which_latent, reshape_latent=True,
+            use_wscale=args.use_wscale).to(device)
+    else:
+        from model import Encoder
+        encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+        e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
+            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+    e_ema.eval()
+    accumulate(e_ema, encoder, 0)
+    
+    e_reg_ratio = 1.
+    e_optim = optim.Adam(
+        encoder.parameters(),
+        lr=args.lr * e_reg_ratio,
+        betas=(0 ** e_reg_ratio, 0.99 ** e_reg_ratio),
+    )
+
+    from idinvert_pytorch.models.perceptual_model import VGG16
+    vggnet = VGG16(output_layer_idx=args.output_layer_idx).to(device)
+    vgg_ckpt = torch.load(args.vgg_ckpt, map_location=lambda storage, loc: storage)
+    vggnet.load_state_dict(vgg_ckpt)
+
     if args.ckpt is not None:  # resume
         print("load model:", args.ckpt)
 
@@ -516,15 +689,25 @@ if __name__ == "__main__":
             pass
 
         generator.load_state_dict(ckpt["g"])
+        encoder.load_state_dict(ckpt["e"])
         discriminator.load_state_dict(ckpt["d"])
         g_ema.load_state_dict(ckpt["g_ema"])
+        e_ema.load_state_dict(ckpt["e_ema"])
 
         g_optim.load_state_dict(ckpt["g_optim"])
+        e_optim.load_state_dict(ckpt["e_optim"])
         d_optim.load_state_dict(ckpt["d_optim"])
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(
             generator,
+            device_ids=[args.local_rank],
+            output_device=args.local_rank,
+            broadcast_buffers=False,
+        )
+
+        encoder = nn.parallel.DistributedDataParallel(
+            encoder,
             device_ids=[args.local_rank],
             output_device=args.local_rank,
             broadcast_buffers=False,
@@ -578,9 +761,10 @@ if __name__ == "__main__":
         batch_size=args.batch,
         sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
         drop_last=True,
+        num_workers=args.num_workers,
     )
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device)
+    train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_optim, d_optim, g_ema, e_ema, device)

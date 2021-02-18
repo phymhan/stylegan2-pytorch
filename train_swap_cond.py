@@ -406,7 +406,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
             requires_grad(discriminator_w, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
 
-        _, fake_img, x_real, x_recon, _ = cross_reconstruction(encoder, generator, frames1, frames2, frames3, args.cond_disc)
+        _, fake_img, x_real, x_recon, x_cross = cross_reconstruction(encoder, generator, frames1, frames2, frames3, args.cond_disc)
 
         if args.lambda_adv > 0:
             if args.augment:
@@ -424,7 +424,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
 
         if args.lambda_vgg > 0:
             real_feat = vggnet(x_real)
-            fake_feat = vggnet(x_recon)
+            fake_feat = vggnet(x_recon) if not args.vgg_on_cross else vggnet(x_cross)
             vgg_loss = torch.mean((fake_feat - real_feat) ** 2)
 
         e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
@@ -630,6 +630,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_sim_opt", action='store_true')
     parser.add_argument("--cond_disc", type=str, default='cond1', choices=['cond1', 'cond2', 'pac'])
     parser.add_argument("--train_from_scratch", action='store_true')
+    parser.add_argument("--vgg_on_cross", action='store_true')
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )

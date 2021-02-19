@@ -13,6 +13,9 @@ from torchvision import datasets, transforms, utils
 from PIL import Image
 from tqdm import tqdm
 import util
+from calc_inception import load_patched_inception_v3
+from fid import extract_feature_from_samples, calc_fid
+import pickle
 import pdb
 st = pdb.set_trace
 
@@ -165,6 +168,17 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
         loader = sample_data2(loader)
     else:
         loader = sample_data(loader)
+    
+    if args.eval_every > 0:
+        inception = nn.DataParallel(load_patched_inception_v3()).to(device)
+        inception.eval()
+        with open(args.inception, "rb") as f:
+            embeds = pickle.load(f)
+            real_mean = embeds["mean"]
+            real_cov = embeds["cov"]
+    else:
+        inception = real_mean = real_cov = None
+    mean_latent = None
 
     pbar = range(args.iter)
 
@@ -294,8 +308,7 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
         g_loss.backward()
         g_optim.step()
 
-        g_regularize = i % args.g_reg_every == 0
-
+        g_regularize = args.g_reg_every > 0 and i % args.g_reg_every == 0
         if g_regularize:
             path_batch_size = max(1, args.batch // args.path_batch_shrink)
             noise = mixing_noise(path_batch_size, args.latent, args.mixing, device)
@@ -398,6 +411,21 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
                             f"ref: {sample_pix_loss.item()};\n")
+
+            if args.eval_every > 0 and i % args.eval_every == 0:
+                with torch.no_grad():
+                    g_ema.eval()
+                    if args.truncation < 1:
+                        mean_latent = g_ema.mean_latent(4096)
+                    features = extract_feature_from_samples(
+                        g_ema, inception, args.truncation, mean_latent, 64, 50000, args.device
+                    ).numpy()
+                    sample_mean = np.mean(features, 0)
+                    sample_cov = np.cov(features, rowvar=False)
+                    fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
+                print("fid:", fid)
+                with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                    f.write(f"{i:07d}; fid: {float(fid):.4f}\n")
 
             if wandb and args.wandb:
                 wandb.log(
@@ -597,6 +625,9 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--pix_loss", type=str, default='l2')
     parser.add_argument("--train_generator", action='store_true', help="update generator with encoder")
+    parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
+    parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
+    parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
 
     args = parser.parse_args()
     util.seed_everything()

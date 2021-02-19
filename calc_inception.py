@@ -97,6 +97,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--flip", action="store_true", help="apply random flipping to real images"
     )
+    parser.add_argument("--name", type=str, default=None, help="name of inception embedding file")
     parser.add_argument("path", metavar="PATH", help="path to datset lmdb file")
 
     args = parser.parse_args()
@@ -124,7 +125,7 @@ if __name__ == "__main__":
     mean = np.mean(features, 0)
     cov = np.cov(features, rowvar=False)
 
-    name = os.path.splitext(os.path.basename(args.path))[0]
+    name = args.name or os.path.splitext(os.path.basename(args.path))[0]
 
     with open(f"inception_{name}.pkl", "wb") as f:
         pickle.dump({"mean": mean, "cov": cov, "size": args.size, "path": args.path}, f)

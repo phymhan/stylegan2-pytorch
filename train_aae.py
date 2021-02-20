@@ -292,6 +292,22 @@ def train(args, loader, generator, encoder, discriminator, prior, vggnet, g_opti
         accumulate(e_ema, e_module, accum)
         accumulate(g_ema, g_module, accum)
 
+        # Train Prior
+        requires_grad(generator, False)
+        requires_grad(encoder, False)
+        requires_grad(prior, True)
+        requires_grad(discriminator, False)
+
+        noise = torch.randn(args.batch, args.latent, device=args.device)
+        latent_fake = prior(noise)
+        fake_pred = discriminator(latent_fake)
+        p_loss = g_nonsaturating_loss(fake_pred)
+        loss_dict["p"] = p_loss
+
+        prior.zero_grad()
+        p_loss.backward()
+        p_optim.step()
+
         loss_reduced = reduce_loss_dict(loss_dict)
 
         d_loss_val = loss_reduced["d"].mean().item()
@@ -338,7 +354,7 @@ def train(args, loader, generator, encoder, discriminator, prior, vggnet, g_opti
                     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                 print("fid:", fid)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; fid: {float(fid):.4f}\n")
+                    f.write(f"{i:07d}: fid: {float(fid):.4f}\n")
 
             if wandb and args.wandb:
                 wandb.log(

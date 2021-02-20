@@ -346,7 +346,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                 print("fid:", fid)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; fid: {float(fid):.4f}\n")
+                    f.write(f"{i:07d}: fid: {float(fid):.4f}\n")
 
             if i % args.save_every == 0:
                 torch.save(

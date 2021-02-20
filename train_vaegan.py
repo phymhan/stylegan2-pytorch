@@ -264,9 +264,63 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
             d_optim.step()
         loss_dict["r1"] = r1_loss
 
-        # Train Encoder and Generator
-        requires_grad(generator, True)
+        # # Train Encoder and Generator
+        # requires_grad(generator, True)
+        # requires_grad(encoder, True)
+        # requires_grad(discriminator, False)
+        # pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
+        # noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        # fake_img, _ = generator(noise)
+        # latent_real, _ = encoder(real_img)
+        # rec_img, _ = generator([latent_real], input_is_latent=True)
+        # fake_pred = discriminator(fake_img)
+        # rec_pred = discriminator(rec_img)
+        # g_loss_fake = g_nonsaturating_loss(fake_pred)
+        # g_loss_rec = g_nonsaturating_loss(rec_pred)
+        # adv_loss = g_loss_fake + g_loss_rec
+        # if args.lambda_pix > 0:
+        #     if args.pix_loss == 'l2':
+        #         pix_loss = torch.mean((rec_img - real_img) ** 2)
+        #     else:
+        #         pix_loss = F.l1_loss(rec_img, real_img)
+        # if args.lambda_vgg > 0:
+        #     vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
+        # e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
+        # loss_dict["e"] = e_loss
+        # encoder.zero_grad()
+        # generator.zero_grad()
+        # e_loss.backward()
+        # e_optim.step()
+        # g_optim.step()
+
+        # Train Encoder
+        requires_grad(generator, False)
         requires_grad(encoder, True)
+        requires_grad(discriminator, False)
+        pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
+        latent_real, _ = encoder(real_img)
+        rec_img, _ = generator([latent_real], input_is_latent=True)
+        rec_pred = discriminator(rec_img)
+        g_loss_rec = g_nonsaturating_loss(rec_pred)
+        adv_loss = g_loss_rec
+        if args.lambda_pix > 0:
+            if args.pix_loss == 'l2':
+                pix_loss = torch.mean((rec_img - real_img) ** 2)
+            else:
+                pix_loss = F.l1_loss(rec_img, real_img)
+        if args.lambda_vgg > 0:
+            vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
+
+        e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
+
+        loss_dict["e"] = e_loss
+        encoder.zero_grad()
+        e_loss.backward()
+        e_optim.step()
+
+        # Train Generator
+        requires_grad(generator, True)
+        requires_grad(encoder, False)
         requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
@@ -286,13 +340,11 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
         if args.lambda_vgg > 0:
             vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
 
-        e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
+        g_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
 
-        loss_dict["e"] = e_loss
-        encoder.zero_grad()
+        loss_dict["g"] = g_loss
         generator.zero_grad()
-        e_loss.backward()
-        e_optim.step()
+        g_loss.backward()
         g_optim.step()
         
         g_regularize = args.g_reg_every > 0 and i % args.g_reg_every == 0
@@ -372,7 +424,7 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
                     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                 print("fid:", fid)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; fid: {float(fid):.4f}\n")
+                    f.write(f"{i:07d}: fid: {float(fid):.4f}\n")
 
             if wandb and args.wandb:
                 wandb.log(

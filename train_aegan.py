@@ -425,7 +425,7 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
                     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                 print("fid:", fid)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; fid: {float(fid):.4f}\n")
+                    f.write(f"{i:07d}: fid: {float(fid):.4f}\n")
 
             if wandb and args.wandb:
                 wandb.log(

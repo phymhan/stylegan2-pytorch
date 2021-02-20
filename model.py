@@ -612,7 +612,7 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], in_channel=3):
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], in_channel=3, n_head=1):
         super().__init__()
 
         channels = {
@@ -650,8 +650,18 @@ class Discriminator(nn.Module):
             EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
             EqualLinear(channels[4], 1),
         )
+        self.n_head = n_head
+        self.final_linear_aux = None
+        if n_head > 1:
+            heads = []
+            for i in range(n_head - 1):
+                heads.append(nn.Sequential(
+                    EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+                    EqualLinear(channels[4], 1),
+                ))
+            self.final_linear_aux = nn.ModuleList(heads)
 
-    def forward(self, input):
+    def forward(self, input, detach_aux=True):
         out = self.convs(input)
 
         batch, channel, height, width = out.shape
@@ -666,29 +676,34 @@ class Discriminator(nn.Module):
 
         out = self.final_conv(out)
 
-        out = out.view(batch, -1)
-        out = self.final_linear(out)
+        h = out.view(batch, -1)
+        out = self.final_linear(h)
+
+        if self.n_head > 1:
+            if detach_aux:
+                h = h.detach()
+            out = [out] + [self.final_linear_aux[i](h) for i in range(self.n_head-1)]
 
         return out
 
 
 class LatentDiscriminator(nn.Module):
-    def __init__(self, latent_dim=512, n_mlp=8):
+    def __init__(self, latent_dim=512, n_mlp=8, hidden_dim=512):
         super().__init__()
         self.latent_dim = latent_dim
-        layers = [PixelNorm()]
+        self.hidden_dim = hidden_dim
+        # layers = [PixelNorm()]
+        layers = []
 
-        for i in range(n_mlp-1):
+        input_dim = latent_dim
+        for i in range(n_mlp):
+            output_dim = 1 if i == n_mlp-1 else hidden_dim
             layers.append(
                 EqualLinear(
-                    latent_dim, latent_dim, lr_mul=0.01, activation="fused_lrelu"
+                    input_dim, output_dim, lr_mul=0.01, activation="fused_lrelu"
                 )
             )
-        layers.append(
-            EqualLinear(
-                latent_dim, 1, lr_mul=0.01, activation="fused_lrelu"
-            )
-        )
+            input_dim = output_dim
         self.layers = nn.Sequential(*layers)
 
     def forward(self, input):
@@ -722,13 +737,15 @@ class LinearResBlock(nn.Module):
 
 
 class LatentMLP(nn.Module):
-    def __init__(self, latent_dim=512, n_mlp=8, use_residual=False):
+    def __init__(self, latent_dim=512, n_mlp=8, use_residual=False, use_pixelnorm=False):
         super().__init__()
         self.latent_dim = latent_dim
         self.use_residual = use_residual
         n_layer_per_block = 2
-        # layers = [PixelNorm()]
-        layers = []
+        if use_pixelnorm:
+            layers = [PixelNorm()]
+        else:
+            layers = []
 
         for i in range(n_mlp//n_layer_per_block):
             layers.append(
@@ -745,6 +762,29 @@ class LatentMLP(nn.Module):
             out = out.view(*shape)
         else:
             out = self.layers(input)
+        return out
+
+
+class LatentPrior(nn.Module):
+    def __init__(self, noise_dim=512, latent_dim=512, hidden_dim=512, n_mlp=8):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        layers = [PixelNorm()]
+
+        input_dim = noise_dim
+        for i in range(n_mlp):
+            output_dim = latent_dim if i == n_mlp-1 else hidden_dim
+            layers.append(
+                EqualLinear(
+                    input_dim, output_dim, lr_mul=0.01, activation="fused_lrelu"
+                )
+            )
+            input_dim = output_dim
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, input):
+        out = self.layers(input)
         return out
 
 
@@ -832,7 +872,7 @@ class Encoder(nn.Module):
             EqualLinear(channels[4], out_channel),
         )
 
-    def forward(self, input):
+    def forward(self, input, reshape=False):
         out = self.convs(input)
         batch = out.shape[0]
 
@@ -854,7 +894,7 @@ class Encoder(nn.Module):
         if self.reparameterization:
             out_logvar = self.final_logvar(out)
             return out_mean, out_logvar
-        if self.which_latent == 'w' and self.reshape_latent:
+        if self.which_latent == 'w' and reshape:
             out_mean = out_mean.reshape(batch, self.n_latent, self.style_dim)
         if self.return_tuple:
             return out_mean, None

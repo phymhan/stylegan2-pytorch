@@ -164,3 +164,6 @@ pretrained*
 *.png
 *.jpg
 *.npy
+
+*.db
+*/*.db

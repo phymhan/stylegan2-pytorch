@@ -13,7 +13,7 @@ from calc_inception import load_patched_inception_v3
 
 @torch.no_grad()
 def extract_feature_from_samples(
-    generator, inception, truncation, truncation_latent, batch_size, n_sample, device
+    generator, inception, truncation, truncation_latent, batch_size, n_sample, device, prior=None
 ):
     n_batch = n_sample // batch_size
     resid = n_sample - (n_batch * batch_size)
@@ -22,7 +22,11 @@ def extract_feature_from_samples(
 
     for batch in tqdm(batch_sizes):
         latent = torch.randn(batch, 512, device=device)
-        img, _ = generator([latent], truncation=truncation, truncation_latent=truncation_latent)
+        if prior is None:
+            img, _ = generator([latent], truncation=truncation, truncation_latent=truncation_latent)
+        else:
+            latent = prior(latent)
+            img, _ = generator([latent], input_is_latent=True, truncation=truncation, truncation_latent=truncation_latent)
         feat = inception(img)[0].view(img.shape[0], -1)
         features.append(feat.to("cpu"))
 

@@ -12,7 +12,7 @@ import numpy as np
 from tqdm import tqdm
 
 from inception import InceptionV3
-from dataset import MultiResolutionDataset
+from dataset import MultiResolutionDataset, VideoFolderDataset
 
 
 class Inception3Feature(Inception3):
@@ -98,6 +98,8 @@ if __name__ == "__main__":
         "--flip", action="store_true", help="apply random flipping to real images"
     )
     parser.add_argument("--name", type=str, default=None, help="name of inception embedding file")
+    parser.add_argument("--dataset", type=str, default='multires')
+    parser.add_argument("--cache", type=str, default=None)
     parser.add_argument("path", metavar="PATH", help="path to datset lmdb file")
 
     args = parser.parse_args()
@@ -105,16 +107,26 @@ if __name__ == "__main__":
     inception = load_patched_inception_v3()
     inception = nn.DataParallel(inception).eval().to(device)
 
-    transform = transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(p=0.5 if args.flip else 0),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-        ]
-    )
-
-    dset = MultiResolutionDataset(args.path, transform=transform, resolution=args.size)
-    loader = DataLoader(dset, batch_size=args.batch, num_workers=4)
+    if args.dataset == 'multires':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(p=0.5 if args.flip else 0),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ]
+        )
+        dset = MultiResolutionDataset(args.path, transform=transform, resolution=args.size)
+    elif args.dataset == 'videofolder':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(p=0.5 if args.flip else 0),
+                transforms.Resize(args.size),  # Image.LANCZOS
+                transforms.CenterCrop(args.size),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
+    loader = DataLoader(dset, batch_size=args.batch, num_workers=4, shuffle=True)
 
     features = extract_features(loader, inception, device).numpy()
 

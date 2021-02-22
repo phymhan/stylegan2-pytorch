@@ -165,7 +165,7 @@ def load_real_samples(args, data_iter):
 
 def train(args, loader, generator, encoder, discriminator, discriminator2,
           vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device):
-    # kwargs_d = {'detach_aux': args.detach_d_aux_head}
+    kwargs_d = {'detach_aux': args.detach_d_aux_head}
     if args.dataset == 'imagefolder':
         loader = sample_data2(loader)
     else:
@@ -236,13 +236,17 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
             print("Done!")
             break
 
+        # real_img = next(loader).to(device)
         real_imgs = [next(loader).to(device) for _ in range(n_step_max)]
 
         # Train Discriminator
         requires_grad(generator, False)
         requires_grad(encoder, False)
         requires_grad(discriminator, True)
+        if discriminator2 is not None:
+            requires_grad(discriminator2, True)
         for step_index in range(args.n_step_d):
+            # real_img = next(loader).to(device)
             real_img = real_imgs[step_index]
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
             fake_img, _ = generator(noise)
@@ -251,29 +255,49 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
                 fake_img, _ = augment(fake_img, ada_aug_p)
             else:
                 real_img_aug = real_img
-            fake_pred = discriminator(fake_img)
-            real_pred = discriminator(real_img_aug)
-            d_loss_fake = F.softplus(fake_pred).mean()
+            fake_pred = discriminator(fake_img, **kwargs_d)
+            real_pred = discriminator(real_img_aug, **kwargs_d)
+            d_loss_real1 = 0.
+            if args.n_head_d > 1:
+                fake_pred = fake_pred[0]
+                real_pred, real_pred1 = real_pred[0], real_pred[1]
+                d_loss_real1 = F.softplus(-real_pred1).mean()
+            d_loss_real2 = 0.
+            if args.decouple_d:
+                real_pred2 = discriminator2(real_img_aug, **kwargs_d)
+                d_loss_real2 = F.softplus(-real_pred2).mean()
             d_loss_real = F.softplus(-real_pred).mean()
+            d_loss_fake = F.softplus(fake_pred).mean()
             loss_dict["real_score"] = real_pred.mean()
             loss_dict["fake_score"] = fake_pred.mean()
 
-            d_loss_rec = 0.
-            if args.lambda_rec_d > 0 and not args.decouple_d:  # Do not train D on x_rec if decouple_d
-                latent_real, _ = encoder(real_img)
-                rec_img, _ = generator([latent_real], input_is_latent=True)
-                if args.augment:
-                    rec_img, _ = augment(rec_img, ada_aug_p)
-                rec_pred = discriminator(rec_img)
-                d_loss_rec = F.softplus(rec_pred).mean()
-                loss_dict["rec_score"] = rec_pred.mean()
+            latent_real, _ = encoder(real_img)
+            rec_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+            if args.augment:
+                rec_img, _ = augment(rec_img, ada_aug_p)
+            if not args.decouple_d:
+                rec_pred = discriminator(rec_img, **kwargs_d)
+                if args.n_head_d > 1:
+                    rec_pred = rec_pred[1]
+            else:
+                rec_pred = discriminator2(rec_img, **kwargs_d)
+            d_loss_rec = F.softplus(rec_pred).mean()
 
-            d_loss = d_loss_real + d_loss_fake + d_loss_rec * args.lambda_rec_d
+            d_loss = (d_loss_real + d_loss_real1 + d_loss_real2 + 
+                d_loss_fake * args.lambda_fake_d + d_loss_rec * args.lambda_rec_d)
+            loss_dict["rec_score"] = rec_pred.mean()
             loss_dict["d"] = d_loss
 
-            discriminator.zero_grad()
-            d_loss.backward()
-            d_optim.step()
+            if not args.decouple_d:
+                discriminator.zero_grad()
+                d_loss.backward()
+                d_optim.step()
+            else:
+                discriminator.zero_grad()
+                discriminator2.zero_grad()
+                d_loss.backward()
+                d_optim.step()
+                d2_optim.step()
 
         if args.augment and args.augment_p == 0:
             ada_aug_p = ada_augment.tune(real_pred)
@@ -282,44 +306,24 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
             real_img.requires_grad = True
-            real_pred = discriminator(real_img)
+            real_pred = discriminator(real_img, **kwargs_d)
+            if args.n_head_d > 1:
+                real_pred = real_pred[0] + real_pred[1]
             r1_loss = d_r1_loss(real_pred, real_img)
             discriminator.zero_grad()
             (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
             d_optim.step()
         loss_dict["r1"] = r1_loss
-        
-        # Train Discriminator2
-        if args.decouple_d and discriminator2 is not None:
-            requires_grad(generator, False)
-            requires_grad(encoder, False)
-            requires_grad(discriminator2, True)
-            for step_index in range(args.n_step_e):  # n_step_d2 is same as n_step_e
-                real_img = real_imgs[step_index]
-                # No augment for x_rec (ada_aug_p is computed from real_pred of D1)
-                latent_real, _ = encoder(real_img)
-                rec_img, _ = generator([latent_real], input_is_latent=True)
-                rec_pred2 = discriminator2(rec_img)
-                real_pred2 = discriminator2(real_img)
-                d2_loss_rec = F.softplus(rec_pred2).mean()
-                d2_loss_real = F.softplus(-real_pred2).mean()
 
-                d2_loss = d2_loss_real + d2_loss_rec
-                loss_dict["d2"] = d2_loss
-                loss_dict["rec_score"] = rec_pred2.mean()
-
-                discriminator2.zero_grad()
-                d2_loss.backward()
-                d2_optim.step()
-
-            d_regularize = i % args.d_reg_every == 0
-            if d_regularize:
-                real_img.requires_grad = True
-                real_pred = discriminator2(real_img)
-                r1_loss = d_r1_loss(real_pred, real_img)
-                discriminator2.zero_grad()
-                (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
-                d2_optim.step()
+        if d_regularize and args.decouple_d:
+            real_img.requires_grad = True
+            real_pred = discriminator2(real_img, **kwargs_d)
+            if args.n_head_d > 1:
+                real_pred = real_pred[0] + real_pred[1]
+            r1_loss = d_r1_loss(real_pred, real_img)
+            discriminator2.zero_grad()
+            (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
+            d2_optim.step()
 
         # Train Generator
         requires_grad(generator, True)
@@ -331,8 +335,26 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
         fake_img, _ = generator(noise)
         if args.augment:
             fake_img, _ = augment(fake_img, ada_aug_p)
-        fake_pred = discriminator(fake_img)
-        g_loss = g_nonsaturating_loss(fake_pred)
+        fake_pred = discriminator(fake_img, **kwargs_d)
+        if args.n_head_d > 1:
+            fake_pred = fake_pred[0]
+        g_loss_fake = g_nonsaturating_loss(fake_pred)
+        
+        g_loss_rec = 0.
+        if args.lambda_rec_g > 0:
+            latent_real, _ = encoder(real_img)
+            rec_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+            if args.augment:
+                rec_img, _ = augment(rec_img, ada_aug_p)
+            if not args.decouple_d:
+                rec_pred = discriminator(rec_img, **kwargs_d)
+                if args.n_head_d > 1:
+                    rec_pred = rec_pred[1]
+            else:
+                rec_pred = discriminator2(rec_img, **kwargs_d)
+            g_loss_rec = g_nonsaturating_loss(rec_pred)
+
+        g_loss = g_loss_fake * args.lambda_fake_g + g_loss_rec * args.lambda_rec_g
         loss_dict["g"] = g_loss
 
         generator.zero_grad()
@@ -361,20 +383,27 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
 
         # Train Encoder
         requires_grad(encoder, True)
-        requires_grad(generator, args.train_ge)
         requires_grad(discriminator, False)
+        requires_grad(generator, args.train_ge)
         if discriminator2 is not None:
             requires_grad(discriminator2, False)
         pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
         for step_index in range(args.n_step_e):
+            # real_img = next(loader).to(device)
             real_img = real_imgs[step_index]
             latent_real, _ = encoder(real_img)
             rec_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
             if args.lambda_adv > 0:
-                if not args.decouple_d:
-                    rec_pred = discriminator(rec_img)
+                if args.augment:
+                    rec_img_aug, _ = augment(rec_img, ada_aug_p)
                 else:
-                    rec_pred = discriminator2(rec_img)
+                    rec_img_aug = rec_img
+                if not args.decouple_d:
+                    rec_pred = discriminator(rec_img_aug, **kwargs_d)
+                    if args.n_head_d > 1:
+                        rec_pred = rec_pred[1]
+                else:
+                    rec_pred = discriminator2(rec_img_aug, **kwargs_d)
                 adv_loss = g_nonsaturating_loss(rec_pred)
             if args.lambda_pix > 0:
                 if args.pix_loss == 'l2':
@@ -394,6 +423,7 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
                 encoder.zero_grad()
                 generator.zero_grad()
                 e_loss.backward()
+                # generator.style.zero_grad()  # not necessary
                 e_optim.step()
                 g_optim.step()
             else:
@@ -654,6 +684,8 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_fake_d", type=float, default=1.0)
     parser.add_argument("--lambda_rec_d", type=float, default=1.0)
+    parser.add_argument("--lambda_fake_g", type=float, default=1.0)
+    parser.add_argument("--lambda_rec_g", type=float, default=0)
     parser.add_argument("--pix_loss", type=str, default='l2')
     parser.add_argument("--train_ge", action='store_true', help="update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
@@ -663,6 +695,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_balanced_d_loss", action='store_true', help="adjust discriminator loss weights?")
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--debug", type=str, default='none')
+    parser.add_argument("--n_head_d", type=int, default=1)
+    parser.add_argument("--detach_d_aux_head", action='store_true')
     parser.add_argument("--decouple_d", action='store_true')
     parser.add_argument("--n_step_d", type=int, default=1)
     parser.add_argument("--n_step_e", type=int, default=1)
@@ -697,7 +731,7 @@ if __name__ == "__main__":
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
     ).to(device)
     discriminator = Discriminator(
-        args.size, channel_multiplier=args.channel_multiplier,
+        args.size, channel_multiplier=args.channel_multiplier, n_head=args.n_head_d
     ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
@@ -722,7 +756,7 @@ if __name__ == "__main__":
     discriminator2 = d2_optim = None
     if args.decouple_d:
         discriminator2 = Discriminator(
-            args.size, channel_multiplier=args.channel_multiplier,
+            args.size, channel_multiplier=args.channel_multiplier, n_head=args.n_head_d
         ).to(device)
         d2_optim = optim.Adam(
             discriminator2.parameters(),

@@ -544,9 +544,9 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
-    if args.resume and args.ckpt is None:
-        args.ckpt = os.path.join(args.log_dir, 'weight', f"latest.pt")
-    if args.ckpt is not None:  # resume
+    if args.resume:
+        if args.ckpt is None:
+            args.ckpt = os.path.join(args.log_dir, 'weight', f"latest.pt")
         print("load model:", args.ckpt)
 
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)

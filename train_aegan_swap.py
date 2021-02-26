@@ -247,7 +247,7 @@ def train(args, loader, loader2,
     sample_x1 = sample_x[:,0,...]
     sample_x2 = sample_x[:,-1,...]
     # sample_idx = torch.randperm(args.n_sample)
-    fid_batch_idx = sample_idx
+    fid_batch_idx = sample_idx = None
 
     n_step_max = max(args.n_step_d, args.n_step_e)
 
@@ -598,23 +598,23 @@ def train(args, loader, loader2,
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid_sa = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                    # Recon
+                    # Recon FID
                     features = extract_feature_from_recon_hybrid(
                         e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        mode='recon', # shuffle_idx=fid_batch_idx
+                        mode='recon',
                     ).numpy()
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid_re = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                    # Hybrid
+                    # Hybrid FID
                     features = extract_feature_from_recon_hybrid(
                         e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        mode='hybrid', # shuffle_idx=fid_batch_idx
+                        mode='hybrid', shuffle_idx=fid_batch_idx
                     ).numpy()
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid_hy = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                print("Sample FID:", fid_sa, "Recon FID:", fid_re, "Hybrid FID:", fid_hy)
+                # print("Sample FID:", fid_sa, "Recon FID:", fid_re, "Hybrid FID:", fid_hy)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
                     f.write(f"{i:07d}; sample fid: {float(fid_sa):.4f}; recon fid: {float(fid_re):.4f}; hybrid fid: {float(fid_hy):.4f};\n")
 
@@ -636,8 +636,9 @@ def train(args, loader, loader2,
 
             if i % args.log_every == 0:
                 with torch.no_grad():
-                    # Fixed fake samples
                     g_ema.eval()
+                    e_ema.eval()
+                    # Fixed fake samples
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
                         sample,
@@ -646,8 +647,22 @@ def train(args, loader, loader2,
                         normalize=True,
                         range=(-1, 1),
                     )
+                    # Fake hybrid samples
+                    w1, _ = e_ema(sample_x1)
+                    w2, _ = e_ema(sample_x2)
+                    dw = w2 - w1
+                    style_z = g_ema.get_styles([sample_z]).view(args.n_sample, -1)
+                    if dw.shape[1] < style_z.shape[1]:  # W space
+                        dw = dw.repeat(1, args.n_latent)
+                    fake_img, _ = g_ema([style_z + dw], input_is_latent=True)
+                    utils.save_image(
+                        fake_img,
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample_hybrid.png"),
+                        nrow=int(args.n_sample ** 0.5),
+                        normalize=True,
+                        range=(-1, 1),
+                    )
                     # Reconstruction samples
-                    e_ema.eval()
                     nrow = int(args.n_sample ** 0.5)
                     nchw = list(sample_x1.shape)[1:]
                     latent_real, _ = e_ema(sample_x1)
@@ -664,9 +679,9 @@ def train(args, loader, loader2,
                     # Cross reconstruction
                     w1, _ = e_ema(sample_x1)
                     w2, _ = e_ema(sample_x2)
-                    delta_w = w2 - w1
-                    delta_w = delta_w[sample_idx,...]
-                    fake_img, _ = g_ema([w1 + delta_w], input_is_latent=True, return_latents=False)
+                    dw = w2 - w1
+                    dw = torch.cat(dw.chunk(2, 0)[::-1], 0) if sample_idx is None else dw[sample_idx,...]
+                    fake_img, _ = g_ema([w1 + dw], input_is_latent=True, return_latents=False)
                     sample = torch.cat((sample_x2.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
                     utils.save_image(
@@ -845,9 +860,6 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
     parser.add_argument("--n_sample_fid", type=int, default=50000, help="number of the samples for calculating FID")
-    parser.add_argument("--use_balanced_d_loss", action='store_true', help="adjust discriminator loss weights?")
-    parser.add_argument("--resume", action='store_true')
-    parser.add_argument("--debug", type=str, default='none')
     parser.add_argument("--decouple_d", action='store_true')
     parser.add_argument("--use_ema", action='store_true')
     parser.add_argument("--use_frames2_d", action='store_true')
@@ -855,6 +867,13 @@ if __name__ == "__main__":
     parser.add_argument("--n_step_e", type=int, default=1)
     parser.add_argument("--nframe_num", type=int, default=5)
     parser.add_argument("--no_sim_g", action='store_true')
+    parser.add_argument("--debug", type=str, default='none')
+    parser.add_argument("--resume", action='store_true')
+    parser.add_argument("--e_ckpt", type=str, default=None, help="path to the checkpoint of encoder")
+    parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoint of generator")
+    parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
+    parser.add_argument("--d2_ckpt", type=str, default=None, help="path to the checkpoint of discriminator2")
+    parser.add_argument("--train_from_scratch", action='store_true')
 
     args = parser.parse_args()
     util.seed_everything()
@@ -978,6 +997,31 @@ if __name__ == "__main__":
         if discriminator2 is not None:
             discriminator2.load_state_dict(ckpt["d2"])
             d2_optim.load_state_dict(ckpt["d2_optim"])
+
+    elif not args.train_from_scratch:
+        if args.e_ckpt is not None:
+            print("load e model:", args.e_ckpt)
+            e_ckpt = torch.load(args.e_ckpt, map_location=lambda storage, loc: storage)
+            encoder.load_state_dict(e_ckpt["e"])
+            e_ema.load_state_dict(e_ckpt["e_ema"])
+            e_optim.load_state_dict(e_ckpt["e_optim"])
+        if args.g_ckpt is not None:
+            print("load g model:", args.g_ckpt)
+            g_ckpt = torch.load(args.g_ckpt, map_location=lambda storage, loc: storage)
+            generator.load_state_dict(g_ckpt["g"])
+            g_ema.load_state_dict(g_ckpt["g_ema"])
+            g_optim.load_state_dict(g_ckpt["g_optim"])
+        if args.d_ckpt is not None:
+            print("load d model:", args.d_ckpt)
+            d_ckpt = torch.load(args.d_ckpt, map_location=lambda storage, loc: storage)
+            discriminator.load_state_dict(d_ckpt["d"])
+            d_optim.load_state_dict(d_ckpt["d_optim"])
+        if args.d2_ckpt is not None:
+            # D2 is for recon and hybrid, still named 'd' in d2_ckpt
+            print("load d model:", args.d2_ckpt)
+            d2_ckpt = torch.load(args.d2_ckpt, map_location=lambda storage, loc: storage)
+            discriminator2.load_state_dict(d2_ckpt["d"])
+            d2_optim.load_state_dict(d2_ckpt["d_optim"])
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(

@@ -184,11 +184,7 @@ def train(args, loader, loader2,
           generator, encoder, discriminator, discriminator2,
           vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device):
     # kwargs_d = {'detach_aux': args.detach_d_aux_head}
-    if args.dataset == 'imagefolder':
-        loader = sample_data2(loader)
-    else:
-        loader = sample_data(loader)
-    
+    inception = real_mean = real_cov = mean_latent = None
     if args.eval_every > 0:
         inception = nn.DataParallel(load_patched_inception_v3()).to(device)
         inception.eval()
@@ -196,17 +192,23 @@ def train(args, loader, loader2,
             embeds = pickle.load(f)
             real_mean = embeds["mean"]
             real_cov = embeds["cov"]
+    if get_rank() == 0:
+        if args.eval_every > 0:
+            with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+        if args.log_every > 0:
+            with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+
+    if args.dataset == 'imagefolder':
+        loader = sample_data2(loader)
     else:
-        inception = real_mean = real_cov = None
-    mean_latent = None
-
+        loader = sample_data(loader)
     pbar = range(args.iter)
-
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
     mean_path_length = 0
-
     d_loss_val = 0
     r1_loss = torch.tensor(0.0, device=device)
     g_loss_val = 0
@@ -947,11 +949,10 @@ if __name__ == "__main__":
     vgg_ckpt = torch.load(args.vgg_ckpt, map_location=lambda storage, loc: storage)
     vggnet.load_state_dict(vgg_ckpt)
 
-    if args.resume and args.ckpt is None:
-        args.ckpt = os.path.join(args.log_dir, 'weight', f"latest.pt")
-    if args.ckpt is not None:  # resume
+    if args.resume:
+        if args.ckpt is None:
+            args.ckpt = os.path.join(args.log_dir, 'weight', f"latest.pt")
         print("load model:", args.ckpt)
-
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
 
         try:
@@ -1031,9 +1032,11 @@ if __name__ == "__main__":
         num_workers=args.num_workers,
     )
     # A subset of length args.n_sample_fid for FID evaluation
-    indices = torch.randperm(len(dataset))[:args.n_sample_fid]
-    dataset2 = data.Subset(dataset, indices)
-    loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
+    loader2 = None
+    if args.eval_every > 0:
+        indices = torch.randperm(len(dataset))[:args.n_sample_fid]
+        dataset2 = data.Subset(dataset, indices)
+        loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)

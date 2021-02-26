@@ -167,11 +167,7 @@ def load_real_samples(args, data_iter):
 def train(args, loader, generator, encoder, discriminator, discriminator2,
           vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device):
     # kwargs_d = {'detach_aux': args.detach_d_aux_head}
-    if args.dataset == 'imagefolder':
-        loader = sample_data2(loader)
-    else:
-        loader = sample_data(loader)
-    
+    inception = real_mean = real_cov = mean_latent = None
     if args.eval_every > 0:
         inception = nn.DataParallel(load_patched_inception_v3()).to(device)
         inception.eval()
@@ -179,17 +175,23 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
             embeds = pickle.load(f)
             real_mean = embeds["mean"]
             real_cov = embeds["cov"]
+    if get_rank() == 0:
+        if args.eval_every > 0:
+            with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+        if args.log_every > 0:
+            with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+
+    if args.dataset == 'imagefolder':
+        loader = sample_data2(loader)
     else:
-        inception = real_mean = real_cov = None
-    mean_latent = None
-
+        loader = sample_data(loader)
     pbar = range(args.iter)
-
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
     mean_path_length = 0
-
     d_loss_val = 0
     r1_loss = torch.tensor(0.0, device=device)
     g_loss_val = 0

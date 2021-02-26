@@ -53,7 +53,7 @@ def set_log_dir(args):
 
 
 def print_args(parser, args):
-    message = ''
+    message = f"Name: {getattr(args, 'name', 'NA')}\n"
     message += '--------------- Arguments ---------------\n'
     for k, v in sorted(vars(args).items()):
         comment = ''
@@ -92,7 +92,7 @@ def save_video(xseq, path):
     write_video(path, video, fps=15)
 
 
-def estimate(netNetwork, tenFirst, tenSecond):
+def estimate_optical_flow(netNetwork, tenFirst, tenSecond):
     # Copied from https://github.com/sniklaus/pytorch-pwc/blob/master/run.py
     # Assume tensors are normalized to [-1, 1]
     tenFirst = (tenFirst + 1.) / 2

@@ -13,6 +13,9 @@ from torchvision import datasets, transforms, utils
 from PIL import Image
 from tqdm import tqdm
 import util
+from calc_inception import load_patched_inception_v3
+from fid import extract_feature_from_samples, calc_fid, extract_feature_from_recon_hybrid
+import pickle
 import pdb
 st = pdb.set_trace
 
@@ -150,11 +153,25 @@ def load_real_samples(args, data_iter):
     return sample_x
 
 
-def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device):
+def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device):
+    inception = real_mean = real_cov = mean_latent = None
+    if args.eval_every > 0:
+        inception = nn.DataParallel(load_patched_inception_v3()).to(device)
+        inception.eval()
+        with open(args.inception, "rb") as f:
+            embeds = pickle.load(f)
+            real_mean = embeds["mean"]
+            real_cov = embeds["cov"]
+    if get_rank() == 0:
+        if args.eval_every > 0:
+            with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+        if args.log_every > 0:
+            with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+
     loader = sample_data(loader)
-
     pbar = range(args.iter)
-
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
@@ -354,6 +371,22 @@ def train(args, loader, encoder, generator, discriminator, vggnet, pwcnet, e_opt
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
                             f"ref: {sample_pix_loss.item()};\n")
+            
+            if args.eval_every > 0 and i % args.eval_every == 0:
+                with torch.no_grad():
+                    g_ema.eval()
+                    e_ema.eval()
+                    # Recon
+                    features = extract_feature_from_recon_hybrid(
+                        e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
+                        mode='recon',
+                    ).numpy()
+                    sample_mean = np.mean(features, 0)
+                    sample_cov = np.cov(features, rowvar=False)
+                    fid_re = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
+                # print("Recon FID:", fid_re)
+                with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                    f.write(f"{i:07d}; recon fid: {float(fid_re):.4f};\n")
 
             if wandb and args.wandb:
                 wandb.log(
@@ -518,6 +551,12 @@ if __name__ == "__main__":
         default=None,
         help="path to the checkpoints to resume training",
     )
+    parser.add_argument(
+        "--g_ckpt",
+        type=str,
+        default=None,
+        help="path to the checkpoint of generator",
+    )
     parser.add_argument("--lr", type=float, default=0.002, help="learning rate")
     parser.add_argument(
         "--channel_multiplier",
@@ -558,6 +597,10 @@ if __name__ == "__main__":
         default=256,
         help="probability update interval of the adaptive augmentation",
     )
+    parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
+    parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
+    parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
+    parser.add_argument("--n_sample_fid", type=int, default=10000, help="number of the samples for calculating FID")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -655,32 +698,38 @@ if __name__ == "__main__":
         betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
     )
 
-    if args.ckpt is not None:
+    if args.resume:
+        if args.ckpt is None:
+            args.ckpt = os.path.join(args.log_dir, 'weight', f"latest.pt")
         print("load model:", args.ckpt)
-
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
-
+        try:
+            ckpt_name = os.path.basename(args.ckpt)
+            if 'iter' in ckpt:
+                args.start_iter = ckpt["iter"]
+            else:
+                args.start_iter = int(os.path.splitext(ckpt_name)[0])
+        except ValueError:
+            pass
+        encoder.load_state_dict(ckpt["e"])
         # generator.load_state_dict(ckpt["g"])
-        if 'g_ema' in ckpt:
-            g_ema.load_state_dict(ckpt["g_ema"])
+        discriminator.load_state_dict(ckpt["d"])
+        e_ema.load_state_dict(ckpt["e_ema"])
+        g_ema.load_state_dict(ckpt["g_ema"])
+        e_optim.load_state_dict(ckpt["e_optim"])
+        # g_optim.load_state_dict(ckpt["g_optim"])
+        d_optim.load_state_dict(ckpt["d_optim"])
+    else:
+        print("load g model:", args.g_ckpt)
+        g_ckpt = torch.load(args.g_ckpt, map_location=lambda storage, loc: storage)
+        # generator.load_state_dict(g_ckpt["g"])
+        if 'g_ema' in g_ckpt:
+            g_ema.load_state_dict(g_ckpt["g_ema"])
         else:
-            g_ema.load_state_dict(ckpt["g"])
-        
+            g_ema.load_state_dict(g_ckpt["g"])
         if not args.no_load_discriminator:
-            discriminator.load_state_dict(ckpt["d"])
-            d_optim.load_state_dict(ckpt["d_optim"])
-
-        if args.resume:
-            try:
-                ckpt_name = os.path.basename(args.ckpt)
-                if 'iter' in ckpt:
-                    args.start_iter = ckpt["iter"]
-                else:
-                    args.start_iter = int(os.path.splitext(ckpt_name)[0])
-            except ValueError:
-                pass
-            encoder.load_state_dict(ckpt["e"])
-            e_optim.load_state_dict(ckpt["e_optim"])
+            discriminator.load_state_dict(g_ckpt["d"])
+            d_optim.load_state_dict(g_ckpt["d_optim"])
 
     if args.distributed:
         encoder = nn.parallel.DistributedDataParallel(
@@ -739,8 +788,13 @@ if __name__ == "__main__":
         sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
         drop_last=True,
     )
+    loader2 = None
+    if args.eval_every > 0:
+        indices = torch.randperm(len(dataset))[:args.n_sample_fid]
+        dataset2 = data.Subset(dataset, indices)
+        loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, encoder, g_ema, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device)
+    train(args, loader, loader2, encoder, g_ema, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device)

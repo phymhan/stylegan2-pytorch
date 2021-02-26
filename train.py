@@ -137,11 +137,7 @@ def set_grad_none(model, targets):
 
 
 def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, device):
-    if args.dataset == 'imagefolder':
-        loader = sample_data2(loader)
-    else:
-        loader = sample_data(loader)
-
+    inception = real_mean = real_cov = mean_latent = None
     if args.eval_every > 0:
         inception = nn.DataParallel(load_patched_inception_v3()).to(device)
         inception.eval()
@@ -149,17 +145,20 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             embeds = pickle.load(f)
             real_mean = embeds["mean"]
             real_cov = embeds["cov"]
+    if get_rank() == 0:
+        if args.eval_every > 0:
+            with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+
+    if args.dataset == 'imagefolder':
+        loader = sample_data2(loader)
     else:
-        inception = real_mean = real_cov = None
-    mean_latent = None
-
+        loader = sample_data(loader)
     pbar = range(args.iter)
-
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
     mean_path_length = 0
-
     d_loss_val = 0
     r1_loss = torch.tensor(0.0, device=device)
     g_loss_val = 0
@@ -354,9 +353,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                print("fid:", fid)
+                # print("fid:", fid)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}: fid: {float(fid):.4f}\n")
+                    f.write(f"{i:07d}; fid: {float(fid):.4f};\n")
 
             if i % args.save_every == 0:
                 torch.save(

@@ -197,8 +197,7 @@ def train(args, loader, loader2,
           encoder, generator, discriminator, discriminator2, discriminator_w,
           vggnet, pwcnet, e_optim, g_optim, g1_optim, d_optim, d2_optim, dw_optim,
           e_ema, g_ema, device):
-    loader = sample_data(loader)
-
+    inception = real_mean = real_cov = mean_latent = None
     if args.eval_every > 0:
         inception = nn.DataParallel(load_patched_inception_v3()).to(device)
         inception.eval()
@@ -206,14 +205,19 @@ def train(args, loader, loader2,
             embeds = pickle.load(f)
             real_mean = embeds["mean"]
             real_cov = embeds["cov"]
-    else:
-        inception = real_mean = real_cov = None
-    mean_latent = None
+    if get_rank() == 0:
+        if args.eval_every > 0:
+            with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+        if args.log_every > 0:
+            with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
 
+    loader = sample_data(loader)
     pbar = range(args.iter)
-
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
+
     mean_path_length = 0
     d_loss_val = 0
     e_loss_val = 0
@@ -631,13 +635,12 @@ def train(args, loader, loader2,
                     # Recon
                     features = extract_feature_from_recon_hybrid(
                         e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        mode='recon', # shuffle_idx=fid_batch_idx
+                        mode='recon',
                     ).numpy()
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid_re = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                     # Hybrid
-                    # e_ema.eval()
                     features = extract_feature_from_recon_hybrid(
                         e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
                         mode='hybrid', # shuffle_idx=fid_batch_idx
@@ -645,22 +648,7 @@ def train(args, loader, loader2,
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid_hy = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                    # # Hybrid FID
-                    # e_ema.eval()
-                    # w1, _ = e_ema(sample_x1)
-                    # w2, _ = e_ema(sample_x2)
-                    # delta_w = w2 - w1
-                    # delta_w = delta_w[sample_idx,...]
-                    # hybrid_img, _ = g_ema([w1 + delta_w], input_is_latent=True)
-                    # features = extract_feature_from_samples(
-                    #     None, inception, args.truncation, mean_latent, 64, args.n_sample, args.device,
-                    #     samples=hybrid_img
-                    # ).numpy()
-                    # sample_mean = np.mean(features, 0)
-                    # sample_cov = np.cov(features, rowvar=False)
-                    # fid_hy = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                # print("Sample FID:", fid_sa, "Hybrid FID:", fid_hy)
-                print("Sample FID:", fid_sa, "Recon FID:", fid_re, "Hybrid FID:", fid_hy)
+                # print("Sample FID:", fid_sa, "Recon FID:", fid_re, "Hybrid FID:", fid_hy)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
                     f.write(f"{i:07d}; sample fid: {float(fid_sa):.4f}; recon fid: {float(fid_re):.4f}; hybrid fid: {float(fid_hy):.4f};\n")
 
@@ -1055,7 +1043,9 @@ if __name__ == "__main__":
             betas=(0 ** d_reg_ratio, 0.99 ** d_reg_ratio),
         )
 
-    if args.resume and args.ckpt is not None:
+    if args.resume:
+        if args.ckpt is None:
+            args.ckpt = os.path.join(args.log_dir, 'weight', f"latest.pt")
         print("load model:", args.ckpt)
         ckpt = torch.load(args.ckpt, map_location=lambda storage, loc: storage)
         try:
@@ -1103,18 +1093,6 @@ if __name__ == "__main__":
             d2_ckpt = torch.load(args.d2_ckpt, map_location=lambda storage, loc: storage)
             discriminator2.load_state_dict(d2_ckpt["d"])
             d2_optim.load_state_dict(d_ckpt["d_optim"])
-
-        if args.resume:
-            try:
-                ckpt_name = os.path.basename(args.ckpt)
-                if 'iter' in ckpt:
-                    args.start_iter = ckpt["iter"]
-                else:
-                    args.start_iter = int(os.path.splitext(ckpt_name)[0])
-            except ValueError:
-                pass
-            encoder.load_state_dict(ckpt["e"])
-            e_optim.load_state_dict(ckpt["e_optim"])
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(
@@ -1186,9 +1164,11 @@ if __name__ == "__main__":
         drop_last=True,
     )
     # A subset of length args.n_sample_fid for FID evaluation
-    indices = torch.randperm(len(dataset))[:args.n_sample_fid]
-    dataset2 = data.Subset(dataset, indices)
-    loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
+    loader2 = None
+    if args.eval_every > 0:
+        indices = torch.randperm(len(dataset))[:args.n_sample_fid]
+        dataset2 = data.Subset(dataset, indices)
+        loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)

@@ -467,6 +467,45 @@ class Generator(nn.Module):
         else:
             style = self.style(input)
         return style
+    
+    def get_styles(
+        self,
+        styles,
+        inject_index=None,
+        truncation=1,
+        truncation_latent=None,
+        input_is_latent=False,
+        noise=None,
+        randomize_noise=True,
+    ):
+        if not input_is_latent:
+            styles = [self.get_latent(s) for s in styles]
+        if noise is None:
+            if randomize_noise:
+                noise = [None] * self.num_layers
+            else:
+                noise = [getattr(self.noises, f"noise_{i}") for i in range(self.num_layers)]
+        if truncation < 1:
+            style_t = []
+            for style in styles:
+                style_t.append(truncation_latent + truncation * (style - truncation_latent))
+            styles = style_t
+        if len(styles) < 2:  # no mixing
+            inject_index = self.n_latent
+            if styles[0].ndim < 3:  # w is of dim [batch, 512], repeat at dim 1 for each block
+                if styles[0].shape[1] == self.style_dim:
+                    latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+                else:
+                    latent = styles[0].view(styles[0].shape[0], -1, self.style_dim)
+            else:  # w is of dim [batch, n_latent, 512]
+                latent = styles[0]
+        else:  # mixing
+            if inject_index is None:
+                inject_index = random.randint(1, self.n_latent - 1)
+            latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+            latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
+            latent = torch.cat([latent, latent2], 1)
+        return latent
 
     def forward(
         self,
@@ -688,12 +727,14 @@ class Discriminator(nn.Module):
 
 
 class LatentDiscriminator(nn.Module):
-    def __init__(self, latent_dim=512, n_mlp=8, hidden_dim=512):
+    def __init__(self, latent_dim=512, n_mlp=8, hidden_dim=512, use_pixelnorm=False):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
-        # layers = [PixelNorm()]
-        layers = []
+        if use_pixelnorm:
+            layers = [PixelNorm()]
+        else:
+            layers = []
 
         input_dim = latent_dim
         for i in range(n_mlp):
@@ -804,7 +845,7 @@ class Encoder(nn.Module):
         style_dim=512,
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
-        which_latent='w',
+        which_latent='w_plus',
         reshape_latent=False,
         stddev_group=4,
         stddev_feat=1,
@@ -812,7 +853,7 @@ class Encoder(nn.Module):
         return_tuple=True,  # backward compatibility
     ):
         """
-        which_latent: 'w' predict different w for all blocks; 'w_shared' predict
+        which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
           a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
           'wb_shared' predict shared w and different biases.
         """
@@ -856,7 +897,7 @@ class Encoder(nn.Module):
         self.stddev_feat = stddev_feat
 
         self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
-        if self.which_latent == 'w':
+        if self.which_latent == 'w_plus':
             out_channel = style_dim * self.n_latent
         elif self.which_latent == 'w_shared':
             out_channel = style_dim
@@ -894,7 +935,7 @@ class Encoder(nn.Module):
         if self.reparameterization:
             out_logvar = self.final_logvar(out)
             return out_mean, out_logvar
-        if self.which_latent == 'w' and reshape:
+        if self.which_latent == 'w_plus' and reshape:
             out_mean = out_mean.reshape(batch, self.n_latent, self.style_dim)
         if self.return_tuple:
             return out_mean, None
@@ -1112,7 +1153,7 @@ class EncoderDebug(nn.Module):
         style_dim=512,
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
-        which_latent='w',
+        which_latent='w_plus',
         reshape_latent=False,
         stddev_group=4,
         stddev_feat=1,
@@ -1122,7 +1163,7 @@ class EncoderDebug(nn.Module):
         use_residual=False,
     ):
         """
-        which_latent: 'w' predict different w for all blocks; 'w_shared' predict
+        which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
           a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
           'wb_shared' predict shared w and different biases.
         """
@@ -1166,7 +1207,7 @@ class EncoderDebug(nn.Module):
         self.stddev_feat = stddev_feat
 
         self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
-        if self.which_latent == 'w':
+        if self.which_latent == 'w_plus':
             out_channel = style_dim * self.n_latent
         elif self.which_latent == 'w_shared':
             out_channel = style_dim

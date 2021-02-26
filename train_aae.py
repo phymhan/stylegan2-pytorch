@@ -584,7 +584,7 @@ if __name__ == "__main__":
     args.n_mlp = 8
     args.n_latent = int(np.log2(args.size)) * 2 - 2
     args.latent = 512
-    if args.which_latent == 'w':
+    if args.which_latent == 'w_plus':
         args.latent_full = args.latent * args.n_latent
     elif args.which_latent == 'w_shared':
         args.latent_full = args.latent

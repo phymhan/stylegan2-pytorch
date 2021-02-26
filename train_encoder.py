@@ -140,11 +140,8 @@ def accumulate_batches(data_iter, num):
 
 
 def load_real_samples(args, data_iter):
-    if args.cache is not None:
-        npy_path = os.path.splitext(args.cache)[0] + f"_real_{args.n_sample}.npy"
-    else:
-        npy_path = None
-    if os.path.exists(npy_path):
+    npy_path = args.sample_cache
+    if npy_path is not None and os.path.exists(npy_path):
         sample_x = torch.from_numpy(np.load(npy_path)).to(args.device)
     else:
         sample_x = accumulate_batches(data_iter, args.n_sample).to(args.device)
@@ -437,6 +434,7 @@ if __name__ == "__main__":
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
     parser.add_argument("--dataset", type=str, default='multires')
     parser.add_argument("--cache", type=str, default='local.db')
+    parser.add_argument("--sample_cache", type=str, default=None)
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
@@ -457,10 +455,10 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_adv", type=float, default=0.1)
     parser.add_argument("--lambda_rec", type=float, default=1.0, help="recon loss on style (w)")
     parser.add_argument("--output_layer_idx", type=int, default=23)
-    parser.add_argument("--vgg_ckpt", type=str, default="pretrained/vgg16.pth")
+    parser.add_argument("--vgg_ckpt", type=str, default="vgg16.pth")
     parser.add_argument("--which_encoder", type=str, default='style')
-    parser.add_argument("--which_latent", type=str, default='w_shared')
-    parser.add_argument("--stddev_group", type=int, default=4)
+    parser.add_argument("--which_latent", type=str, default='w_plus')
+    parser.add_argument("--stddev_group", type=int, default=1)
     parser.add_argument("--use_residual_latent_mlp", action='store_true')
     parser.add_argument("--n_latent_mlp", type=int, default=8)
     parser.add_argument(
@@ -575,7 +573,7 @@ if __name__ == "__main__":
 
     args.n_latent = int(np.log2(args.size)) * 2 - 2  # used in Generator
     args.latent = 512  # fixed, dim of w or z (same size)
-    if args.which_latent == 'w':
+    if args.which_latent == 'w_plus':
         args.latent_full = args.latent * args.n_latent
     elif args.which_latent == 'w_shared':
         args.latent_full = args.latent

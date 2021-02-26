@@ -2,9 +2,34 @@ import os
 import sys
 import math
 import torch
+import shutil
 import random
 import numpy as np
 from torchvision.io import write_video
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+        self.vec2sca_avg = 0
+        self.vec2sca_val = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+        if torch.is_tensor(self.val) and torch.numel(self.val) != 1:
+            self.avg[self.count == 0] = 0
+            self.vec2sca_avg = self.avg.sum() / len(self.avg)
+            self.vec2sca_val = self.val.sum() / len(self.val)
 
 
 def seed_everything(seed=42):
@@ -57,6 +82,15 @@ def print_args(parser, args):
         f.write(' '.join(sys.argv))
         f.write('\n')
 
+    # backup train code
+    shutil.copyfile(sys.argv[0], os.path.join(args.log_dir, f'{os.path.basename(sys.argv[0])}.txt'))
+
+
+def save_video(xseq, path):
+    video = xseq.data.cpu().clamp(-1, 1)
+    video = ((video+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
+    write_video(path, video, fps=15)
+
 
 def estimate(netNetwork, tenFirst, tenSecond):
     # Copied from https://github.com/sniklaus/pytorch-pwc/blob/master/run.py
@@ -88,33 +122,3 @@ def estimate(netNetwork, tenFirst, tenSecond):
     tenFlow[:, 1, :, :] *= float(intHeight) / float(intPreprocessedHeight)
 
     return tenFlow[0, :, :, :]
-
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-        self.vec2sca_avg = 0
-        self.vec2sca_val = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-        if torch.is_tensor(self.val) and torch.numel(self.val) != 1:
-            self.avg[self.count == 0] = 0
-            self.vec2sca_avg = self.avg.sum() / len(self.avg)
-            self.vec2sca_val = self.val.sum() / len(self.val)
-
-
-def save_video(xseq, path):
-    video = xseq.data.cpu().clamp(-1, 1)
-    video = ((video+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
-    write_video(path, video, fps=15)

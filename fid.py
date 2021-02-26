@@ -9,24 +9,65 @@ from tqdm import tqdm
 
 from model import Generator
 from calc_inception import load_patched_inception_v3
-
+import pdb
+st = pdb.set_trace
 
 @torch.no_grad()
 def extract_feature_from_samples(
-    generator, inception, truncation, truncation_latent, batch_size, n_sample, device, prior=None
+    generator, inception, truncation, truncation_latent, batch_size, n_sample, device,
+    prior=None, samples=None, verbose=False,
 ):
     n_batch = n_sample // batch_size
     resid = n_sample - (n_batch * batch_size)
-    batch_sizes = [batch_size] * n_batch + [resid]
+    batch_sizes = [batch_size] * n_batch + [resid] if resid > 0 else [batch_size] * n_batch
     features = []
-
-    for batch in tqdm(batch_sizes):
-        latent = torch.randn(batch, 512, device=device)
-        if prior is None:
-            img, _ = generator([latent], truncation=truncation, truncation_latent=truncation_latent)
+    cnt = 0
+    pbar = tqdm(batch_sizes) if verbose else batch_sizes
+    for batch in pbar:
+        if samples is not None:
+            img = samples[cnt:cnt+batch,...]
+            cnt += batch
         else:
-            latent = prior(latent)
-            img, _ = generator([latent], input_is_latent=True, truncation=truncation, truncation_latent=truncation_latent)
+            latent = torch.randn(batch, 512, device=device)
+            if prior is None:
+                img, _ = generator([latent], truncation=truncation, truncation_latent=truncation_latent)
+            else:
+                latent = prior(latent)
+                img, _ = generator([latent], input_is_latent=True, truncation=truncation, truncation_latent=truncation_latent)
+        feat = inception(img)[0].view(img.shape[0], -1)
+        features.append(feat.to("cpu"))
+
+    features = torch.cat(features, 0)
+
+    return features
+
+
+@torch.no_grad()
+def extract_feature_from_recon_hybrid(
+    encoder, generator, inception, truncation, truncation_latent, loader, device,
+    mode='hybrid', shuffle_idx=None, verbose=False,
+):
+    # batch_size = loader.batch_size
+    features = []
+    pbar = tqdm(loader) if verbose else loader
+    for frames in pbar:
+        frames = frames.to(device)
+        frames1 = frames[:,0,...]
+        frames2 = frames[:,-1,...]
+        if mode == 'recon':
+            w, _ = encoder(frames1)
+            img, _ = generator([w], input_is_latent=True)
+        elif mode == 'hybrid':
+            w1, _ = encoder(frames1)
+            w2, _ = encoder(frames2)
+            dw = w2 - w1
+            if shuffle_idx is None:
+                # Swap upper and lower half
+                dw_ = torch.cat(dw.chunk(2, 0)[::-1], 0)
+            else:  # Shuffle by shuffle_idx
+                j = shuffle_idx[shuffle_idx<frames1.shape[0]] if len(shuffle_idx) > frames1.shape[0] else shuffle_idx
+                dw_ = dw[j]
+            img, _ = generator([w1 + dw_], input_is_latent=True)
         feat = inception(img)[0].view(img.shape[0], -1)
         features.append(feat.to("cpu"))
 

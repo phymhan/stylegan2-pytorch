@@ -180,7 +180,7 @@ if __name__ == "__main__":
 
     args.n_latent = int(np.log2(args.size)) * 2 - 2  # used in Generator
     args.latent = 512  # fixed, dim of w or z (same size)
-    if args.which_latent == 'w':
+    if args.which_latent == 'w_plus':
         args.latent_full = args.latent * args.n_latent
     elif args.which_latent == 'w_shared':
         args.latent_full = args.latent

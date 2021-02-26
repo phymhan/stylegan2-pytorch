@@ -50,14 +50,16 @@ def extract_feature_from_recon_hybrid(
     # batch_size = loader.batch_size
     features = []
     pbar = tqdm(loader) if verbose else loader
-    for frames in pbar:
-        frames = frames.to(device)
-        frames1 = frames[:,0,...]
-        frames2 = frames[:,-1,...]
+    for imgs in pbar:
+        imgs = imgs.to(device)
         if mode == 'recon':
-            w, _ = encoder(frames1)
+            if imgs.ndim > 4:  # [N, T, C, H, W]
+                imgs = imgs[:,0,...]
+            w, _ = encoder(imgs)
             img, _ = generator([w], input_is_latent=True)
         elif mode == 'hybrid':
+            frames1 = imgs[:,0,...]
+            frames2 = imgs[:,-1,...]
             w1, _ = encoder(frames1)
             w2, _ = encoder(frames2)
             dw = w2 - w1

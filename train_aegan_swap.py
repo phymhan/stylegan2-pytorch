@@ -676,14 +676,26 @@ def train(args, loader, loader2,
                         normalize=True,
                         range=(-1, 1),
                     )
-                    # Cross reconstruction
+                    # Cross reconstruction: [real_y1, real_y2; real_x1, fake_x2]
                     w1, _ = e_ema(sample_x1)
                     w2, _ = e_ema(sample_x2)
                     dw = w2 - w1
                     dw = torch.cat(dw.chunk(2, 0)[::-1], 0) if sample_idx is None else dw[sample_idx,...]
                     fake_img, _ = g_ema([w1 + dw], input_is_latent=True, return_latents=False)
-                    sample = torch.cat((sample_x2.reshape(args.n_sample//nrow, nrow, *nchw), 
-                                        fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    # sample = torch.cat((sample_x2.reshape(args.n_sample//nrow, nrow, *nchw), 
+                    #                     fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    drive = torch.cat((
+                        torch.cat(sample_x1.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
+                        torch.cat(sample_x2.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
+                    ), 1)  # [n_sample, 2, C, H, w]
+                    source = torch.cat((
+                        sample_x1.reshape(args.n_sample, 1, *nchw),
+                        fake_img.reshape(args.n_sample, 1, *nchw),
+                    ), 1)  # [n_sample, 2, C, H, w]
+                    sample = torch.cat((
+                        drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
+                        source.reshape(args.n_sample//nrow, 2*nrow, *nchw),
+                    ), 1)  # [n_sample//nrow, 4*nrow, C, H, W]
                     utils.save_image(
                         sample.reshape(2*args.n_sample, *nchw),
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),

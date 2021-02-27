@@ -310,9 +310,9 @@ def train(args, loader, loader2,
                         source.reshape(args.n_sample//nrow, 2*nrow, *nchw),
                     ), 1)  # [n_sample//nrow, 4*nrow, C, H, W]
                     utils.save_image(
-                        sample.reshape(2*args.n_sample, *nchw),
+                        sample.reshape(4*args.n_sample, *nchw),
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
-                        nrow=nrow,
+                        nrow=2*nrow,
                         normalize=True,
                         range=(-1, 1),
                     )
@@ -326,6 +326,7 @@ def train(args, loader, loader2,
                         range=(-1, 1),
                     )
                     # Fake hybrid samples
+                    sample_src = sample
                     w1, _ = e_eval(sample_x1)
                     w2, _ = e_eval(sample_x2)
                     dw = w2 - w1
@@ -333,10 +334,22 @@ def train(args, loader, loader2,
                     if dw.shape[1] < style_z.shape[1]:  # W space
                         dw = dw.repeat(1, args.n_latent)
                     fake_img, _ = g_ema([style_z + dw], input_is_latent=True)
+                    drive = torch.cat((
+                        sample_x1.reshape(args.n_sample, 1, *nchw),
+                        sample_x2.reshape(args.n_sample, 1, *nchw),
+                    ), 1)
+                    source = torch.cat((
+                        sample_src.reshape(args.n_sample, 1, *nchw),
+                        fake_img.reshape(args.n_sample, 1, *nchw),
+                    ), 1)
+                    sample = torch.cat((
+                        drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
+                        source.reshape(args.n_sample//nrow, 2*nrow, *nchw),
+                    ), 1)
                     utils.save_image(
-                        fake_img,
+                        sample.reshape(4*args.n_sample, *nchw),
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample_hybrid.png"),
-                        nrow=int(args.n_sample ** 0.5),
+                        nrow=2*nrow,
                         normalize=True,
                         range=(-1, 1),
                     )

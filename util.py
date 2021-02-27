@@ -1,5 +1,6 @@
 import os
 import sys
+import ast
 import math
 import torch
 import shutil
@@ -84,6 +85,30 @@ def print_args(parser, args):
 
     # backup train code
     shutil.copyfile(sys.argv[0], os.path.join(args.log_dir, f'{os.path.basename(sys.argv[0])}.txt'))
+
+
+def str2list(attr_bins):
+    assert (isinstance(attr_bins, str))
+    attr_bins = attr_bins.strip()
+    if attr_bins.endswith(('.npy', '.npz')):
+        attr_bins = np.load(attr_bins)
+    else:
+        assert (attr_bins.startswith('[') and attr_bins.endswith(']'))
+        # attr_bins = np.array(ast.literal_eval(attr_bins))
+        attr_bins = ast.literal_eval(attr_bins)
+    return attr_bins
+
+def get_nframe_num(args):
+    if args.nframe_num_range and args.nframe_iter_range:
+        nframe_num_list = (
+            [args.nframe_num_range[0]] * max(0, int(args.nframe_iter_range[0])) + 
+            list(np.linspace(args.nframe_num_range[0], args.nframe_num_range[1],
+                args.nframe_iter_range[1] - args.nframe_iter_range[0] + 1, dtype=int)) + 
+            [args.nframe_num_range[1]] * max(0, int(args.iter - args.nframe_iter_range[1] + 2))
+        )
+    else:
+        nframe_num_list = [args.nframe_num] * (args.iter + 2)
+    return nframe_num_list
 
 
 def save_video(xseq, path):

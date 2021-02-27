@@ -193,7 +193,22 @@ def cross_reconstruction(encoder, generator, frames1, frames2, shuffle=True):
     return real_img, fake_img, x_real, x_recon, x_cross
 
 
-def train(args, loader, loader2,
+def get_batch(loader, device, T=0, rand=True):
+    frames = next(loader)  # [N, T, C, H, W]
+    batch = frames.shape[0]
+    if T <= 0:
+        T = frames.shape[1]
+    frames1 = frames[:,0,...]
+    if rand:
+        frames2 = frames[range(batch),torch.randint(1,T,(batch,)),...]
+    else:
+        frames2 = frames[:,T-1,...]
+    frames1 = frames1.to(device)
+    frames2 = frames2.to(device)
+    return frames1, frames2
+
+
+def train(args, loader, loader2, T_list,
           encoder, generator, discriminator, discriminator2, discriminator_w,
           vggnet, pwcnet, e_optim, g_optim, g1_optim, d_optim, d2_optim, dw_optim,
           e_ema, g_ema, device):
@@ -326,7 +341,6 @@ def train(args, loader, loader2,
                         range=(-1, 1),
                     )
                     # Fake hybrid samples
-                    sample_src = sample
                     w1, _ = e_eval(sample_x1)
                     w2, _ = e_eval(sample_x2)
                     dw = w2 - w1
@@ -339,7 +353,7 @@ def train(args, loader, loader2,
                         sample_x2.reshape(args.n_sample, 1, *nchw),
                     ), 1)
                     source = torch.cat((
-                        sample_src.reshape(args.n_sample, 1, *nchw),
+                        sample.reshape(args.n_sample, 1, *nchw),
                         fake_img.reshape(args.n_sample, 1, *nchw),
                     ), 1)
                     sample = torch.cat((
@@ -359,12 +373,14 @@ def train(args, loader, loader2,
             print("Done!")
             break
 
-        frames = next(loader)  # [N, T, C, H, W]
-        batch = frames.shape[0]
-        frames1 = frames[:,0,...]
-        frames2 = frames[range(batch),torch.randint(1,args.nframe_num,(batch,)),...]
-        frames1 = frames1.to(device)
-        frames2 = frames2.to(device)
+        # frames = next(loader)  # [N, T, C, H, W]
+        # batch = frames.shape[0]
+        # frames1 = frames[:,0,...]
+        # frames2 = frames[range(batch),torch.randint(1,args.nframe_num,(batch,)),...]
+        # frames1 = frames1.to(device)
+        # frames2 = frames2.to(device)
+        frames1, frames2 = get_batch(loader, device, T_list[i], not args.no_rand_T)
+        batch = frames1.shape[0]
 
         # Train Discriminator
         requires_grad(encoder, False)
@@ -921,6 +937,9 @@ if __name__ == "__main__":
     parser.add_argument("--decouple_d", action='store_true')
     parser.add_argument("--lambda_fake_cross_d", type=float, default=0)
     parser.add_argument("--lambda_fake_cross_g", type=float, default=0)
+    parser.add_argument("--no_rand_T", action='store_true')
+    parser.add_argument('--nframe_num_range', type=util.str2list, default=[])
+    parser.add_argument('--nframe_iter_range', type=util.str2list, default=[])
 
     args = parser.parse_args()
     util.seed_everything(0)
@@ -1124,7 +1143,8 @@ if __name__ == "__main__":
                 output_device=args.local_rank,
                 broadcast_buffers=False,
             )
-
+    T_list = util.get_nframe_num(args)
+    dataset = None
     if args.dataset == 'multires':
         # TODO: force G(w+Dy) to be real
         transform = transforms.Compose(
@@ -1168,7 +1188,7 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, loader2,
+    train(args, loader, loader2, T_list,
           encoder, generator, discriminator, discriminator2, discriminator_w,
           vggnet, pwcnet, e_optim, g_optim, g1_optim, d_optim, d2_optim, dw_optim,
           e_ema, g_ema, device)

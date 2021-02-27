@@ -169,18 +169,22 @@ def load_real_samples(args, data_iter):
     return sample_x, sample_idx
 
 
-def get_batch(loader, device):
+def get_batch(loader, device, T=0, rand=True):
     frames = next(loader)  # [N, T, C, H, W]
     batch = frames.shape[0]
-    nframe_num = frames.shape[1]
+    if T <= 0:
+        T = frames.shape[1]
     frames1 = frames[:,0,...]
-    frames2 = frames[range(batch),torch.randint(1,nframe_num,(batch,)),...]
+    if rand:
+        frames2 = frames[range(batch),torch.randint(1,T,(batch,)),...]
+    else:
+        frames2 = frames[:,T-1,...]
     frames1 = frames1.to(device)
     frames2 = frames2.to(device)
     return frames1, frames2
 
 
-def train(args, loader, loader2,
+def train(args, loader, loader2, T_list,
           generator, encoder, discriminator, discriminator2,
           vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device):
     # kwargs_d = {'detach_aux': args.detach_d_aux_head}
@@ -260,8 +264,8 @@ def train(args, loader, loader2,
         if i > args.iter:
             print("Done!")
             break
-
-        frames = [get_batch(loader, device) for _ in range(n_step_max)]
+        
+        frames = [get_batch(loader, device, T_list[i], not args.no_rand_T) for _ in range(n_step_max)]
 
         # Train Discriminator
         requires_grad(generator, False)
@@ -662,7 +666,7 @@ def train(args, loader, loader2,
                         sample_x2.reshape(args.n_sample, 1, *nchw),
                     ), 1)
                     source = torch.cat((
-                        sample_src.reshape(args.n_sample, 1, *nchw),
+                        sample.reshape(args.n_sample, 1, *nchw),
                         fake_img.reshape(args.n_sample, 1, *nchw),
                     ), 1)
                     sample = torch.cat((
@@ -898,6 +902,9 @@ if __name__ == "__main__":
     parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
     parser.add_argument("--d2_ckpt", type=str, default=None, help="path to the checkpoint of discriminator2")
     parser.add_argument("--train_from_scratch", action='store_true')
+    parser.add_argument("--no_rand_T", action='store_true')
+    parser.add_argument('--nframe_num_range', type=util.str2list, default=[])
+    parser.add_argument('--nframe_iter_range', type=util.str2list, default=[])
 
     args = parser.parse_args()
     util.seed_everything()
@@ -1073,6 +1080,7 @@ if __name__ == "__main__":
                 output_device=args.local_rank,
                 broadcast_buffers=False,
             )
+    T_list = util.get_nframe_num(args)
     dataset = None
     if args.dataset == 'videofolder':
         # [Note] Potentially, same transforms will be applied to a batch of images,
@@ -1109,6 +1117,6 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, loader2,
+    train(args, loader, loader2, T_list,
           generator, encoder, discriminator, discriminator2,
           vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device)

@@ -727,13 +727,18 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
     parser.add_argument("--n_sample_fid", type=int, default=50000, help="number of the samples for calculating FID")
-    parser.add_argument("--resume", action='store_true')
-    parser.add_argument("--debug", type=str, default='none')
+    parser.add_argument("--nframe_num", type=int, default=5)
     parser.add_argument("--decouple_d", action='store_true')
     parser.add_argument("--use_ema", action='store_true')
     parser.add_argument("--n_step_d", type=int, default=1)
     parser.add_argument("--n_step_e", type=int, default=1)
     parser.add_argument("--no_sim_g", action='store_true')
+    parser.add_argument("--debug", type=str, default='none')
+    parser.add_argument("--resume", action='store_true')
+    parser.add_argument("--e_ckpt", type=str, default=None, help="path to the checkpoint of encoder")
+    parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoint of generator")
+    parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
+    parser.add_argument("--train_from_scratch", action='store_true')
 
     args = parser.parse_args()
     util.seed_everything()
@@ -857,6 +862,24 @@ if __name__ == "__main__":
         if discriminator2 is not None:
             discriminator2.load_state_dict(ckpt["d2"])
             d2_optim.load_state_dict(ckpt["d2_optim"])
+    elif not args.train_from_scratch:
+        if args.e_ckpt is not None:
+            print("load e model:", args.e_ckpt)
+            e_ckpt = torch.load(args.e_ckpt, map_location=lambda storage, loc: storage)
+            encoder.load_state_dict(e_ckpt["e"])
+            e_ema.load_state_dict(e_ckpt["e_ema"])
+            e_optim.load_state_dict(e_ckpt["e_optim"])
+        if args.g_ckpt is not None:
+            print("load g model:", args.g_ckpt)
+            g_ckpt = torch.load(args.g_ckpt, map_location=lambda storage, loc: storage)
+            generator.load_state_dict(g_ckpt["g"])
+            g_ema.load_state_dict(g_ckpt["g_ema"])
+            g_optim.load_state_dict(g_ckpt["g_optim"])
+        if args.d_ckpt is not None:
+            print("load d model:", args.d_ckpt)
+            d_ckpt = torch.load(args.d_ckpt, map_location=lambda storage, loc: storage)
+            discriminator.load_state_dict(d_ckpt["d"])
+            d_optim.load_state_dict(d_ckpt["d_optim"])
 
     if args.distributed:
         generator = nn.parallel.DistributedDataParallel(
@@ -931,12 +954,25 @@ if __name__ == "__main__":
     # A subset of length args.n_sample_fid for FID evaluation
     loader2 = None
     if args.eval_every > 0:
-        indices = torch.randperm(len(dataset))[:args.n_sample_fid]
-        dataset2 = data.Subset(dataset, indices)
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.Resize(args.size),
+                transforms.CenterCrop(args.size),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
+        dataset2 = VideoFolderDataset(args.path, transform, mode='nframe',
+            nframe_num=args.nframe_num, cache=args.cache, unbind=False,
+        )
+        indices = torch.randperm(len(dataset2))[:args.n_sample_fid]
+        dataset2 = data.Subset(dataset2, indices)
         loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, loader2, generator, encoder, discriminator, discriminator2,
-          vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device)
+    train(
+        args, loader, loader2, generator, encoder, discriminator, discriminator2,
+        vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device
+    )

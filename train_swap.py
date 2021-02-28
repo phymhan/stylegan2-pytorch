@@ -274,6 +274,7 @@ def train(args, loader, loader2, T_list,
 
     # sample_x = accumulate_batches(loader, args.n_sample).to(device)
     sample_x, sample_idx = load_real_samples(args, loader)
+    assert (sample_x.shape[1] >= args.nframe_num)
     sample_x1 = sample_x[:,0,...]
     sample_x2 = sample_x[:,-1,...]
     fid_batch_idx = sample_idx = None  # Swap

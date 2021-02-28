@@ -248,6 +248,7 @@ def train(args, loader, loader2, T_list,
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
     sample_x, sample_idx = load_real_samples(args, loader)
+    assert (sample_x.shape[1] >= args.nframe_num)
     sample_x1 = sample_x[:,0,...]
     sample_x2 = sample_x[:,-1,...]
     # sample_idx = torch.randperm(args.n_sample)
@@ -1117,6 +1118,8 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, loader2, T_list,
-          generator, encoder, discriminator, discriminator2,
-          vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device)
+    train(
+        args, loader, loader2, T_list,
+        generator, encoder, discriminator, discriminator2,
+        vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device
+    )

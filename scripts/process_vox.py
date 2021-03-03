@@ -29,6 +29,8 @@ def get_frames(vidpath, image_size=0, every_nth=1, trim_len=float('Inf')):
             images = []
         success, image = vidcap.read()
         idx += 1
+    if len(clips) == 0:
+        clips = [images]
     return clips
 
 

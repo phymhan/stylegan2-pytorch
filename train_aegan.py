@@ -223,12 +223,12 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
     sample_x = load_real_samples(args, loader)
-    # sample_x1 = sample_x2 = sample_idx = fid_batch_idx = None
+    sample_x1 = sample_x2 = sample_idx = fid_batch_idx = None
     if sample_x.ndim > 4:
-        # sample_x1 = sample_x[:,0,...]
-        # sample_x2 = sample_x[:,-1,...]
+        sample_x1 = sample_x[:,0,...]
+        sample_x2 = sample_x[:,-1,...]
         sample_x = sample_x[:,0,...]
-    
+
     n_step_max = max(args.n_step_d, args.n_step_e)
 
     requires_grad(g_ema, False)
@@ -510,8 +510,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
 
             if i % args.log_every == 0:
                 with torch.no_grad():
-                    # Fixed fake samples
                     g_ema.eval()
+                    e_ema.eval()
+                    nrow = int(args.n_sample ** 0.5)
+                    nchw = list(sample_x1.shape)[1:]
+                    # Fixed fake samples
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
                         sample,
@@ -521,7 +524,6 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         range=(-1, 1),
                     )
                     # Reconstruction samples
-                    e_ema.eval()
                     nrow = int(args.n_sample ** 0.5)
                     nchw = list(sample_x.shape)[1:]
                     latent_real, _ = e_ema(sample_x)
@@ -532,6 +534,28 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         sample.reshape(2*args.n_sample, *nchw),
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
                         nrow=nrow,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+                    # Hybrid samples: [real_y1, real_y2; real_x1, fake_x2]
+                    w1, _ = e_ema(sample_x1)
+                    w2, _ = e_ema(sample_x2)
+                    dw = w2 - w1
+                    dw = torch.cat(dw.chunk(2, 0)[::-1], 0) if sample_idx is None else dw[sample_idx,...]
+                    fake_img, _ = g_ema([w1 + dw], input_is_latent=True, return_latents=False)
+                    drive = torch.cat((
+                        torch.cat(sample_x1.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
+                        torch.cat(sample_x2.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw)), 1)
+                    source = torch.cat((
+                        sample_x1.reshape(args.n_sample, 1, *nchw),
+                        fake_img.reshape(args.n_sample, 1, *nchw)), 1)
+                    sample = torch.cat((
+                        drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
+                        source.reshape(args.n_sample//nrow, 2*nrow, *nchw)), 1)
+                    utils.save_image(
+                        sample.reshape(4*args.n_sample, *nchw),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
+                        nrow=2*nrow,
                         normalize=True,
                         range=(-1, 1),
                     )

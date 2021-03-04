@@ -222,11 +222,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
-    sample_x = load_real_samples(args, loader)
-    sample_x1 = sample_x2 = sample_idx = fid_batch_idx = None
+    sample_x = load_real_samples(args, loader2 or loader)
+    # sample_x1 = sample_x2 = sample_idx = fid_batch_idx = None
     if sample_x.ndim > 4:
-        sample_x1 = sample_x[:,0,...]
-        sample_x2 = sample_x[:,-1,...]
+        # sample_x1 = sample_x[:,0,...]
+        # sample_x2 = sample_x[:,-1,...]
         sample_x = sample_x[:,0,...]
     
     n_step_max = max(args.n_step_d, args.n_step_e)
@@ -399,36 +399,10 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             fake_img, _ = augment(fake_img, ada_aug_p)
         fake_pred = discriminator(fake_img)
         g_loss_fake = g_nonsaturating_loss(fake_pred)
-        # loss_dict["g"] = g_loss_fake
-        if args.no_sim_g:
-            generator.zero_grad()
-            g_loss_fake.backward()
-            g_optim.step()
-
-        g_loss_rec = 0.
-        if args.lambda_rec_g > 0:
-            if args.use_ema:
-                e_ema.eval()
-                latent_real, _ = e_ema(real_img)
-            else:
-                latent_real, _ = encoder(real_img)
-            rec_img, _ = generator([latent_real], input_is_latent=True)
-            if not args.decouple_d:
-                rec_pred = discriminator(rec_img)
-            else:
-                rec_pred = discriminator2(rec_img)
-            g_loss_rec = g_nonsaturating_loss(rec_pred)
-            if args.no_sim_g:
-                generator.zero_grad()
-                (g_loss_rec * args.lambda_rec_g).backward()
-                g_optim.step()
-
-        g_loss = g_loss_fake + g_loss_rec * args.lambda_rec_g
-        loss_dict["g"] = g_loss
-        if not args.no_sim_g:
-            generator.zero_grad()
-            g_loss.backward()
-            g_optim.step()
+        loss_dict["g"] = g_loss_fake
+        generator.zero_grad()
+        g_loss_fake.backward()
+        g_optim.step()
 
         g_regularize = args.g_reg_every > 0 and i % args.g_reg_every == 0
         if g_regularize:
@@ -720,7 +694,6 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_fake_d", type=float, default=1.0)
     parser.add_argument("--lambda_rec_d", type=float, default=1.0)
-    parser.add_argument("--lambda_rec_g", type=float, default=0)
     parser.add_argument("--pix_loss", type=str, default='l2')
     parser.add_argument("--train_ge", action='store_true', help="update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
@@ -732,7 +705,6 @@ if __name__ == "__main__":
     parser.add_argument("--use_ema", action='store_true')
     parser.add_argument("--n_step_d", type=int, default=1)
     parser.add_argument("--n_step_e", type=int, default=1)
-    parser.add_argument("--no_sim_g", action='store_true')
     parser.add_argument("--debug", type=str, default='none')
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--e_ckpt", type=str, default=None, help="path to the checkpoint of encoder")
@@ -968,6 +940,8 @@ if __name__ == "__main__":
         indices = torch.randperm(len(dataset2))[:args.n_sample_fid]
         dataset2 = data.Subset(dataset2, indices)
         loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
+        if args.sample_cache is not None:
+            load_real_samples(args, loader2)
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)

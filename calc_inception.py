@@ -5,7 +5,7 @@ import os
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from torchvision.models import inception_v3, Inception3
 import numpy as np
@@ -107,6 +107,7 @@ if __name__ == "__main__":
     inception = load_patched_inception_v3()
     inception = nn.DataParallel(inception).eval().to(device)
 
+    dset = None
     if args.dataset == 'multires':
         transform = transforms.Compose(
             [
@@ -126,11 +127,14 @@ if __name__ == "__main__":
             ]
         )
         dset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
+
+    indices = torch.randperm(len(dset))[:args.n_sample]
+    dset = Subset(dset, indices)
     loader = DataLoader(dset, batch_size=args.batch, num_workers=4, shuffle=True)
 
     features = extract_features(loader, inception, device).numpy()
 
-    features = features[: args.n_sample]
+    # features = features[: args.n_sample]
 
     print(f"extracted {features.shape[0]} features")
 

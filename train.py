@@ -184,8 +184,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
 
-    n_step_max = max(args.n_step_d, args.n_step_e)
-
     for idx in pbar:
         i = idx + args.start_iter
 
@@ -196,15 +194,15 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         # real_img = next(loader)
         # real_img = real_img.to(device)
-        real_imgs = [next(loader).to(device) for _ in range(n_step_max)]
+        # real_imgs = [next(loader).to(device) for _ in range(args.n_step_d)]
 
         # Train Discriminator
         requires_grad(generator, False)
         requires_grad(discriminator, True)
 
         for step_index in range(args.n_step_d):
-            # real_img = next(loader).to(device)
-            real_img = real_imgs[step_index]
+            real_img = next(loader).to(device)
+            # real_img = real_imgs[step_index]
 
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
             fake_img, _ = generator(noise)
@@ -249,7 +247,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # Train Generator
         requires_grad(generator, True)
         requires_grad(discriminator, False)
-        real_img = real_imgs[0]
+        # real_img = real_imgs[0]
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         fake_img, _ = generator(noise)

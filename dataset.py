@@ -11,6 +11,7 @@ import os
 import numpy as np
 import tqdm
 import random
+from natsort import natsorted
 
 IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm']
 
@@ -101,7 +102,7 @@ class VideoFolderDataset(Dataset):
             length_list = []
             for i, video in enumerate(tqdm.tqdm(os.listdir(dataroot), desc="Counting videos")):
                 if os.path.isdir(os.path.join(dataroot, video)):
-                    frames = sorted(os.listdir(os.path.join(dataroot, video)))
+                    frames = natsorted(os.listdir(os.path.join(dataroot, video)))
                 else:
                     continue
                 frame_list = []

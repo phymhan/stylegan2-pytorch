@@ -222,7 +222,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
-    sample_x = load_real_samples(args, loader2 or loader)
+    sample_x = load_real_samples(args, loader)
     # sample_x1 = sample_x2 = sample_idx = fid_batch_idx = None
     if sample_x.ndim > 4:
         # sample_x1 = sample_x[:,0,...]
@@ -941,7 +941,7 @@ if __name__ == "__main__":
         dataset2 = data.Subset(dataset2, indices)
         loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
         if args.sample_cache is not None:
-            load_real_samples(args, loader2)
+            load_real_samples(args, sample_data(loader2))
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)

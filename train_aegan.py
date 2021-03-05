@@ -539,7 +539,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     g_ema.eval()
                     e_ema.eval()
                     nrow = int(args.n_sample ** 0.5)
-                    nchw = list(sample_x1.shape)[1:]
+                    nchw = list(sample_x.shape)[1:]
                     # Fixed fake samples
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
@@ -550,8 +550,6 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         range=(-1, 1),
                     )
                     # Reconstruction samples
-                    nrow = int(args.n_sample ** 0.5)
-                    nchw = list(sample_x.shape)[1:]
                     latent_real, _ = e_ema(sample_x)
                     fake_img, _ = g_ema([latent_real], input_is_latent=True, return_latents=False)
                     sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 

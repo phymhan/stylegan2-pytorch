@@ -217,9 +217,13 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
-
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
+    if args.decouple_d and args.augment:
+        ada_aug_p2 = args.augment_p if args.augment_p > 0 else 0.0
+        # r_t_stat2 = 0
+        if args.augment_p == 0:
+            ada_augment2 = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
     sample_x = load_real_samples(args, loader)
@@ -311,7 +315,6 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             requires_grad(discriminator2, True)
             for step_index in range(args.n_step_e):  # n_step_d2 is same as n_step_e
                 real_img = real_imgs[step_index]
-                # No augment for x_rec (ada_aug_p is computed from real_pred of D1)
                 if args.use_ema:
                     e_ema.eval()
                     g_ema.eval()
@@ -320,8 +323,13 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 else:
                     latent_real, _ = encoder(real_img)
                     rec_img, _ = generator([latent_real], input_is_latent=True)
+                if args.augment:
+                    real_img_aug, _ = augment(real_img, ada_aug_p2)
+                    rec_img, _ = augment(rec_img, ada_aug_p2)
+                else:
+                    real_img_aug = real_img
                 rec_pred = discriminator2(rec_img)
-                real_pred = discriminator2(real_img)
+                real_pred = discriminator2(real_img_aug)
                 d2_loss_rec = F.softplus(rec_pred).mean()
                 d2_loss_real = F.softplus(-real_pred).mean()
 
@@ -341,6 +349,10 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 discriminator2.zero_grad()
                 (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
                 d2_optim.step()
+            
+            if args.augment and args.augment_p == 0:
+                ada_aug_p2 = ada_augment2.tune(rec_pred)
+                # r_t_stat2 = ada_augment2.r_t_stat
 
         # Train Encoder
         requires_grad(encoder, True)
@@ -359,15 +371,25 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             if args.lambda_pix > 0:
                 if args.pix_loss == 'l2':
                     pix_loss = torch.mean((rec_img - real_img) ** 2)
-                else:
+                elif args.pix_loss == 'l1':
                     pix_loss = F.l1_loss(rec_img, real_img)
+                else:
+                    raise NotImplementedError
             if args.lambda_vgg > 0:
                 vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
             if args.lambda_adv > 0:
                 if not args.decouple_d:
-                    rec_pred = discriminator(rec_img)
+                    if args.augment:
+                        rec_img_aug, _ = augment(rec_img, ada_aug_p)
+                    else:
+                        rec_img_aug = rec_img
+                    rec_pred = discriminator(rec_img_aug)
                 else:
-                    rec_pred = discriminator2(rec_img)
+                    if args.augment:
+                        rec_img_aug, _ = augment(rec_img, ada_aug_p2)
+                    else:
+                        rec_img_aug = rec_img
+                    rec_pred = discriminator2(rec_img_aug)
                 adv_loss = g_nonsaturating_loss(rec_pred)
             
             e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
@@ -462,6 +484,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
 
             if args.eval_every > 0 and i % args.eval_every == 0:
                 with torch.no_grad():
+                    fid_sa = fid_re = fid_hy = 0
                     # Sample FID
                     g_ema.eval()
                     if args.truncation < 1:
@@ -481,13 +504,14 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     sample_cov = np.cov(features, rowvar=False)
                     fid_re = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                     # Hybrid FID
-                    features = extract_feature_from_recon_hybrid(
-                        e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        mode='hybrid', # shuffle_idx=fid_batch_idx
-                    ).numpy()
-                    sample_mean = np.mean(features, 0)
-                    sample_cov = np.cov(features, rowvar=False)
-                    fid_hy = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
+                    if args.eval_hybrid:
+                        features = extract_feature_from_recon_hybrid(
+                            e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
+                            mode='hybrid', # shuffle_idx=fid_batch_idx
+                        ).numpy()
+                        sample_mean = np.mean(features, 0)
+                        sample_cov = np.cov(features, rowvar=False)
+                        fid_hy = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                 # print("Sample FID:", fid_sa, "Recon FID:", fid_re, "Hybrid FID:", fid_hy)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
                     f.write(f"{i:07d}; sample fid: {float(fid_sa):.4f}; recon fid: {float(fid_re):.4f}; hybrid fid: {float(fid_hy):.4f};\n")
@@ -538,27 +562,28 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         range=(-1, 1),
                     )
                     # Hybrid samples: [real_y1, real_y2; real_x1, fake_x2]
-                    w1, _ = e_ema(sample_x1)
-                    w2, _ = e_ema(sample_x2)
-                    dw = w2 - w1
-                    dw = torch.cat(dw.chunk(2, 0)[::-1], 0) if sample_idx is None else dw[sample_idx,...]
-                    fake_img, _ = g_ema([w1 + dw], input_is_latent=True, return_latents=False)
-                    drive = torch.cat((
-                        torch.cat(sample_x1.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
-                        torch.cat(sample_x2.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw)), 1)
-                    source = torch.cat((
-                        sample_x1.reshape(args.n_sample, 1, *nchw),
-                        fake_img.reshape(args.n_sample, 1, *nchw)), 1)
-                    sample = torch.cat((
-                        drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
-                        source.reshape(args.n_sample//nrow, 2*nrow, *nchw)), 1)
-                    utils.save_image(
-                        sample.reshape(4*args.n_sample, *nchw),
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
-                        nrow=2*nrow,
-                        normalize=True,
-                        range=(-1, 1),
-                    )
+                    if args.eval_hybrid:
+                        w1, _ = e_ema(sample_x1)
+                        w2, _ = e_ema(sample_x2)
+                        dw = w2 - w1
+                        dw = torch.cat(dw.chunk(2, 0)[::-1], 0) if sample_idx is None else dw[sample_idx,...]
+                        fake_img, _ = g_ema([w1 + dw], input_is_latent=True, return_latents=False)
+                        drive = torch.cat((
+                            torch.cat(sample_x1.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
+                            torch.cat(sample_x2.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw)), 1)
+                        source = torch.cat((
+                            sample_x1.reshape(args.n_sample, 1, *nchw),
+                            fake_img.reshape(args.n_sample, 1, *nchw)), 1)
+                        sample = torch.cat((
+                            drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
+                            source.reshape(args.n_sample//nrow, 2*nrow, *nchw)), 1)
+                        utils.save_image(
+                            sample.reshape(4*args.n_sample, *nchw),
+                            os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
+                            nrow=2*nrow,
+                            normalize=True,
+                            range=(-1, 1),
+                        )
 
             if i % args.save_every == 0:
                 torch.save(
@@ -903,6 +928,7 @@ if __name__ == "__main__":
                 output_device=args.local_rank,
                 broadcast_buffers=False,
             )
+    args.eval_hybrid = (args.dataset == 'videofolder')
     dataset = None
     if args.dataset == 'multires':
         transform = transforms.Compose(
@@ -950,19 +976,23 @@ if __name__ == "__main__":
     # A subset of length args.n_sample_fid for FID evaluation
     loader2 = None
     if args.eval_every > 0:
-        transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size),
-                transforms.CenterCrop(args.size),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset2 = VideoFolderDataset(args.path, transform, mode='nframe',
-            nframe_num=args.nframe_num, cache=args.cache, unbind=False,
-        )
-        indices = torch.randperm(len(dataset2))[:args.n_sample_fid]
-        dataset2 = data.Subset(dataset2, indices)
+        if args.eval_hybrid:
+            transform = transforms.Compose(
+                [
+                    transforms.RandomHorizontalFlip(),
+                    transforms.Resize(args.size),
+                    transforms.CenterCrop(args.size),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+                ]
+            )
+            dataset2 = VideoFolderDataset(args.path, transform, mode='nframe',
+                nframe_num=args.nframe_num, cache=args.cache, unbind=False,
+            )
+            indices = torch.randperm(len(dataset2))[:args.n_sample_fid]
+            dataset2 = data.Subset(dataset2, indices)
+        else:
+            indices = torch.randperm(len(dataset))[:args.n_sample_fid]
+            dataset2 = data.Subset(dataset, indices)
         loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
         if args.sample_cache is not None:
             load_real_samples(args, sample_data(loader2))

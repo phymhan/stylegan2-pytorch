@@ -51,6 +51,8 @@ def extract_feature_from_recon_hybrid(
     features = []
     pbar = tqdm(loader) if verbose else loader
     for imgs in pbar:
+        if isinstance(imgs, (list, tuple)):
+            imgs = imgs[0]
         imgs = imgs.to(device)
         if mode == 'recon':
             if imgs.ndim > 4:  # [N, T, C, H, W]

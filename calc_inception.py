@@ -6,10 +6,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Subset
-from torchvision import transforms
+from torchvision import transforms, datasets
 from torchvision.models import inception_v3, Inception3
 import numpy as np
 from tqdm import tqdm
+from PIL import Image
 
 from inception import InceptionV3
 from dataset import MultiResolutionDataset, VideoFolderDataset
@@ -127,7 +128,19 @@ if __name__ == "__main__":
             ]
         )
         dset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
+    elif args.dataset == 'imagefolder':
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(p=0.5 if args.flip else 0),
+                transforms.Resize(args.size, Image.LANCZOS),
+                transforms.CenterCrop(args.size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dset = datasets.ImageFolder(args.path, transform=transform)
 
+    # args.n_sample = min(args.n_sample, len(dset))
     indices = torch.randperm(len(dset))[:args.n_sample]
     dset = Subset(dset, indices)
     loader = DataLoader(dset, batch_size=args.batch, num_workers=4, shuffle=True)

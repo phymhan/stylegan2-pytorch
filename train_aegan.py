@@ -141,6 +141,8 @@ def accumulate_batches(data_iter, num):
     samples = []
     while num > 0:
         imgs = next(data_iter)
+        if isinstance(imgs, (list, tuple)):
+            imgs = imgs[0]
         samples.append(imgs)
         num -= imgs.size(0)
     samples = torch.cat(samples, dim=0)

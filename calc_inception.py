@@ -65,6 +65,8 @@ def extract_features(loader, inception, device):
     feature_list = []
 
     for img in pbar:
+        if isinstance(img, (list, tuple)):  # (image, label) pair
+            img = img[0]
         img = img.to(device)
         feature = inception(img)[0].view(img.shape[0], -1)
         feature_list.append(feature.to("cpu"))

@@ -303,10 +303,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
             real_img.requires_grad = True
-            if args.augment:
-                real_img_aug, _ = augment(real_img, ada_aug_p)
-            else:
-                real_img_aug = real_img
+            # if args.augment:
+            #     real_img_aug, _ = augment(real_img, ada_aug_p)
+            # else:
+            #     real_img_aug = real_img
+            real_img_aug = real_img
             real_pred = discriminator(real_img_aug)
             r1_loss = d_r1_loss(real_pred, real_img)
             discriminator.zero_grad()

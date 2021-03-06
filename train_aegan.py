@@ -220,12 +220,12 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
     if args.augment and args.augment_p == 0:
-        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
+        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
     if args.decouple_d and args.augment:
         ada_aug_p2 = args.augment_p if args.augment_p > 0 else 0.0
         # r_t_stat2 = 0
         if args.augment_p == 0:
-            ada_augment2 = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
+            ada_augment2 = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
     sample_x = load_real_samples(args, loader)
@@ -303,7 +303,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
             real_img.requires_grad = True
-            real_pred = discriminator(real_img)
+            if args.augment:
+                real_img_aug, _ = augment(real_img, ada_aug_p)
+            else:
+                real_img_aug = real_img
+            real_pred = discriminator(real_img_aug)
             r1_loss = d_r1_loss(real_pred, real_img)
             discriminator.zero_grad()
             (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
@@ -728,7 +732,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ada_every",
         type=int,
-        default=256,
+        default=8,
         help="probability update interval of the adaptive augmentation",
     )
     parser.add_argument("--num_workers", type=int, default=0)

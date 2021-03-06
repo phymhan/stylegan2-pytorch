@@ -149,6 +149,9 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         if args.eval_every > 0:
             with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
                 f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+        if args.log_every > 0:
+            with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
 
     if args.dataset == 'imagefolder':
         loader = sample_data2(loader)
@@ -331,6 +334,17 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                         "Path Length": path_length_val,
                     }
                 )
+            
+            if i % args.log_every == 0:
+                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                    f.write(
+                        (
+                            f"{i:07d}; "
+                            f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
+                            f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
+                            f"augment: {ada_aug_p:.4f};\n"
+                        )
+                    )
 
             if i % args.log_every == 0:
                 with torch.no_grad():

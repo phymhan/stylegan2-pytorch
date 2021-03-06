@@ -287,7 +287,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     rec_img, _ = augment(rec_img, ada_aug_p)
                 rec_pred = discriminator(rec_img)
                 d_loss_rec = F.softplus(rec_pred).mean()
-                loss_dict["rec_score"] = rec_pred.mean()
+                loss_dict["recx_score"] = rec_pred.mean()
 
             d_loss = d_loss_real + d_loss_fake + d_loss_rec * args.lambda_rec_d
             loss_dict["d"] = d_loss
@@ -341,7 +341,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
 
                 d2_loss = d2_loss_real + d2_loss_rec
                 loss_dict["d2"] = d2_loss
-                loss_dict["rec_score"] = rec_pred.mean()
+                loss_dict["recx_score"] = rec_pred.mean()
 
                 discriminator2.zero_grad()
                 d2_loss.backward()
@@ -462,6 +462,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         path_loss_val = loss_reduced["path"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
+        recx_score_val = loss_reduced["recx_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         pix_loss_val = loss_reduced["pix"].mean().item()
         vgg_loss_val = loss_reduced["vgg"].mean().item()
@@ -487,6 +488,16 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
                             f"ref: {sample_pix_loss.item()};\n")
+                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                    f.write(
+                        (
+                            f"{i:07d}; pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; ref: {sample_pix_loss.item():.4f}; "
+                            f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
+                            f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
+                            f"augment: {ada_aug_p:.4f}; "
+                            f"real score: {real_score_val:.4f}; fake score: {fake_score_val:.4f}; recx score: {recx_score_val:.4f};\n"
+                        )
+                    )
 
             if args.eval_every > 0 and i % args.eval_every == 0:
                 with torch.no_grad():
@@ -764,6 +775,7 @@ if __name__ == "__main__":
     parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoint of generator")
     parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
     parser.add_argument("--train_from_scratch", action='store_true')
+    parser.add_argument("--limit_train_batches", type=float, default=1)
 
     args = parser.parse_args()
     util.seed_everything()
@@ -970,10 +982,15 @@ if __name__ == "__main__":
             ]
         )
         dataset = datasets.ImageFolder(args.path, transform=transform)
+    if args.limit_train_batches < 1:
+        indices = torch.randperm(len(dataset))[:int(args.limit_train_batches * len(dataset))]
+        dataset1 = data.Subset(dataset, indices)
+    else:
+        dataset1 = dataset
     loader = data.DataLoader(
-        dataset,
+        dataset1,
         batch_size=args.batch,
-        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
+        sampler=data_sampler(dataset1, shuffle=True, distributed=args.distributed),
         drop_last=True,
         num_workers=args.num_workers,
     )

@@ -303,9 +303,9 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             d_optim.step()
 
         if args.augment and args.augment_p == 0:
-            if args.aug_pred == 'real':
+            if args.ada_pred == 'real':
                 ada_aug_p = ada_augment.tune(real_pred)
-            elif args.aug_pred == 'recon':
+            elif args.ada_pred == 'recon':
                 ada_aug_p = ada_augment.tune(rec_pred)
             else:
                 raise NotImplementedError
@@ -489,7 +489,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
-                            f"ref: {sample_pix_loss.item()};\n")
+                            f"ref: {sample_pix_loss.item()}; ada: {ada_aug_p};\n")
 
             if args.eval_every > 0 and i % args.eval_every == 0:
                 with torch.no_grad():
@@ -767,7 +767,7 @@ if __name__ == "__main__":
     parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoint of generator")
     parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
     parser.add_argument("--train_from_scratch", action='store_true')
-    parser.add_argument("--aug_pred", type=str, default='recon')
+    parser.add_argument("--ada_pred", type=str, default='recon')
 
     args = parser.parse_args()
     util.seed_everything()

@@ -123,7 +123,7 @@ class VideoFolderDataset(Dataset):
         self.cumsum = np.cumsum([0] + self.lengths)
         self.lengthsn = [i - nframe_num + 1 for i in self.lengths]
         self.cumsumn = np.cumsum([0] + self.lengthsn)
-        print("Total numver of videos {}.".format(len(self.videos)))
+        print("Total number of videos {}.".format(len(self.videos)))
         print("Total number of frames {}.".format(np.sum(self.lengths)))
         if self.mode == 'video':
             self._dataset_length = len(self.videos)

@@ -40,7 +40,8 @@ from non_leaking import augment, AdaptiveAugment
 def manually_scale_grad(model, scale):
     if model is not None:
         for p in model.parameters():
-            p.grad *= scale
+            if p.grad is not None:
+                p.grad *= scale
 
 
 def data_sampler(dataset, shuffle, distributed):

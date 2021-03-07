@@ -219,6 +219,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
+    r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
     if args.decouple_d and args.augment:
@@ -299,6 +300,10 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         if args.augment and args.augment_p == 0:
             ada_aug_p = ada_augment.tune(real_pred)
             r_t_stat = ada_augment.r_t_stat
+        # Compute batchwise r_t
+        r_t_dict['real'] = torch.sign(real_pred).sum().item() / args.batch
+        r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
+        r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
 
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
@@ -492,7 +497,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                             f"{i:07d}; pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; ref: {sample_pix_loss.item():.4f}; "
                             f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
                             f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
-                            f"augment: {ada_aug_p:.4f}; r_t: {r_t_stat}"
+                            f"augment: {ada_aug_p:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
                             f"real score: {real_score_val:.4f}; fake score: {fake_score_val:.4f}; recx score: {recx_score_val:.4f};\n"
                         )
                     )

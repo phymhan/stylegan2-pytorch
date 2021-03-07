@@ -303,7 +303,6 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         # Compute batchwise r_t
         r_t_dict['real'] = torch.sign(real_pred).sum().item() / args.batch
         r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
-        r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
 
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
@@ -365,6 +364,8 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             if args.augment and args.augment_p == 0:
                 ada_aug_p2 = ada_augment2.tune(rec_pred)
                 # r_t_stat2 = ada_augment2.r_t_stat
+
+        r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
 
         # Train Encoder
         requires_grad(encoder, True)

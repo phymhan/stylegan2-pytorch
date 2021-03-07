@@ -290,7 +290,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 d_loss_rec = F.softplus(rec_pred).mean()
                 loss_dict["recx_score"] = rec_pred.mean()
 
-            d_loss = d_loss_real + d_loss_fake + d_loss_rec * args.lambda_rec_d
+            d_loss = d_loss_real + d_loss_fake * args.lambda_fake_d + d_loss_rec * args.lambda_rec_d
             loss_dict["d"] = d_loss
 
             discriminator.zero_grad()
@@ -497,9 +497,9 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         (
                             f"{i:07d}; pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; ref: {sample_pix_loss.item():.4f}; "
                             f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
-                            f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
+                            f"path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
                             f"augment: {ada_aug_p:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
-                            f"real score: {real_score_val:.4f}; fake score: {fake_score_val:.4f}; recx score: {recx_score_val:.4f};\n"
+                            f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f};\n"
                         )
                     )
 
@@ -780,6 +780,7 @@ if __name__ == "__main__":
     parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
     parser.add_argument("--train_from_scratch", action='store_true')
     parser.add_argument("--limit_train_batches", type=float, default=1)
+    parser.add_argument("--no_eval_hybrid", action='store_true')
 
     args = parser.parse_args()
     util.seed_everything()
@@ -948,7 +949,7 @@ if __name__ == "__main__":
                 output_device=args.local_rank,
                 broadcast_buffers=False,
             )
-    args.eval_hybrid = (args.dataset == 'videofolder')
+    args.eval_hybrid = not args.no_eval_hybrid and args.dataset == 'videofolder'
     dataset = None
     if args.dataset == 'multires':
         transform = transforms.Compose(

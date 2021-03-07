@@ -487,15 +487,12 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
                     sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
-                            f"ref: {sample_pix_loss.item()};\n")
-                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(
                         (
                             f"{i:07d}; pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; ref: {sample_pix_loss.item():.4f}; "
                             f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
                             f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
-                            f"augment: {ada_aug_p:.4f}; "
+                            f"augment: {ada_aug_p:.4f}; r_t: {r_t_stat}"
                             f"real score: {real_score_val:.4f}; fake score: {fake_score_val:.4f}; recx score: {recx_score_val:.4f};\n"
                         )
                     )

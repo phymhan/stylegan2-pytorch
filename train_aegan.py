@@ -220,6 +220,8 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
     r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
+    real_diff = 0
+    fake_diff = 0
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
     if args.decouple_d and args.augment:
@@ -304,6 +306,15 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         r_t_dict['real'] = torch.sign(real_pred).sum().item() / args.batch
         r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
 
+        with torch.no_grad():
+            real_diff = torch.mean(real_pred - rec_pred).item()
+            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+            x_fake, _ = generator(noise)
+            x_recf, _ = generator([encoder(x_fake)[0]], input_is_latent=True)
+            recf_pred = discriminator(x_recf)
+            fake_pred = discriminator(x_fake)
+            fake_diff = torch.mean(fake_pred - recf_pred).item()
+
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
             real_img.requires_grad = True
@@ -351,6 +362,8 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 discriminator2.zero_grad()
                 d2_loss.backward()
                 d2_optim.step()
+
+                real_diff = torch.mean(real_pred - rec_pred).item()
 
             d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
@@ -499,7 +512,8 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                             f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
                             f"path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
                             f"augment: {ada_aug_p:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
-                            f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f};\n"
+                            f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f}; "
+                            f"real_diff: {real_diff:.4f}; fake_diff: {fake_diff:.4f};\n"
                         )
                     )
 

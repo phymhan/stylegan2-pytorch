@@ -37,6 +37,46 @@ from distributed import (
 from non_leaking import augment, AdaptiveAugment
 
 
+class AdaptiveAugment2:
+    def __init__(self, margin, ada_aug_len, update_every, device):
+        self.margin = margin
+        self.ada_aug_len = ada_aug_len
+        self.update_every = update_every
+
+        self.ada_update = 0
+        self.ada_aug_buf = torch.tensor([0.0, 0.0], device=device)
+        self.r_t_stat = 0
+        self.ada_aug_p = 0
+
+    @torch.no_grad()
+    def tune(self, pred1, pred2):
+        # strength += beta * sign(pred1 - pred2 - margin)
+        # tune(fake_pred, recx_pred), strength incresases
+        self.ada_aug_buf += torch.tensor(
+            ((pred1-pred2).sum().item(), pred1.shape[0]),
+            device=pred1.device,
+        )
+        self.ada_update += 1
+
+        if self.ada_update % self.update_every == 0:
+            self.ada_aug_buf = reduce_sum(self.ada_aug_buf)
+            pred_signs, n_pred = self.ada_aug_buf.tolist()
+
+            self.r_t_stat = pred_signs / n_pred
+
+            if self.r_t_stat > self.margin:
+                sign = 1
+            else:
+                sign = -1
+
+            self.ada_aug_p += sign * n_pred / self.ada_aug_len
+            self.ada_aug_p = min(1, max(0, self.ada_aug_p))
+            self.ada_aug_buf.mul_(0)
+            self.ada_update = 0
+
+        return self.ada_aug_p
+
+
 def manually_scale_grad(model, scale):
     if model is not None:
         for p in model.parameters():
@@ -217,22 +257,18 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         d_module = discriminator
     
     d2_module = None
-    if discriminator2 is not None:
-        if args.distributed:
-            d2_module = discriminator2.module
-        else:
-            d2_module = discriminator2
+    # if discriminator2 is not None:
+    #     if args.distributed:
+    #         d2_module = discriminator2.module
+    #     else:
+    #         d2_module = discriminator2
 
     accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
+    r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
     if args.augment and args.augment_p == 0:
-        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
-    if args.decouple_d and args.augment:
-        ada_aug_p2 = args.augment_p if args.augment_p > 0 else 0.0
-        # r_t_stat2 = 0
-        if args.augment_p == 0:
-            ada_augment2 = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
+        ada_augment = AdaptiveAugment2(args.ada_margin, args.ada_length, args.ada_every, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
     sample_x = load_real_samples(args, loader)
@@ -268,11 +304,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 fake_img, _ = g_ema(noise)
             else:
                 fake_img, _ = generator(noise)
-            # if args.augment:
-            #     real_img_aug, _ = augment(real_img, ada_aug_p)
-            #     fake_img, _ = augment(fake_img, ada_aug_p)
-            # else:
-            #     real_img_aug = real_img
+
             fake_pred = discriminator(fake_img)
             real_pred = discriminator(real_img)
             d_loss_fake = F.softplus(fake_pred).mean()
@@ -290,13 +322,12 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 else:
                     latent_real, _ = encoder(real_img)
                     rec_img, _ = generator([latent_real], input_is_latent=True)
-                # if args.augment:
-                #     rec_img, _ = augment(rec_img, ada_aug_p)
+
                 rec_pred = discriminator(rec_img)
                 d_loss_rec = F.softplus(rec_pred).mean()
-                loss_dict["rec_score"] = rec_pred.mean()
+                loss_dict["recx_score"] = rec_pred.mean()
 
-            d_loss = d_loss_real + d_loss_fake + d_loss_rec * args.lambda_rec_d
+            d_loss = d_loss_real + d_loss_fake * args.lambda_fake_d + d_loss_rec * args.lambda_rec_d
             loss_dict["d"] = d_loss
 
             discriminator.zero_grad()
@@ -304,13 +335,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             d_optim.step()
 
         if args.augment and args.augment_p == 0:
-            if args.ada_pred == 'real':
-                ada_aug_p = ada_augment.tune(real_pred)
-            elif args.ada_pred == 'recon':
-                ada_aug_p = ada_augment.tune(rec_pred)
-            else:
-                raise NotImplementedError
+            ada_aug_p = ada_augment.tune(fake_pred, rec_pred)
             r_t_stat = ada_augment.r_t_stat
+        r_t_dict['real'] = torch.sign(real_pred).sum().item() / args.batch
+        r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
+        r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
 
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
@@ -321,58 +350,12 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
             d_optim.step()
         loss_dict["r1"] = r1_loss
-        
-        # Train Discriminator2
-        if args.decouple_d and discriminator2 is not None:
-            requires_grad(generator, False)
-            requires_grad(encoder, False)
-            requires_grad(discriminator2, True)
-            for step_index in range(args.n_step_e):  # n_step_d2 is same as n_step_e
-                real_img = real_imgs[step_index]
-                if args.use_ema:
-                    e_ema.eval()
-                    g_ema.eval()
-                    latent_real, _ = e_ema(real_img)
-                    rec_img, _ = g_ema([latent_real], input_is_latent=True)
-                else:
-                    latent_real, _ = encoder(real_img)
-                    rec_img, _ = generator([latent_real], input_is_latent=True)
-                # if args.augment:
-                #     real_img_aug, _ = augment(real_img, ada_aug_p2)
-                #     rec_img, _ = augment(rec_img, ada_aug_p2)
-                # else:
-                #     real_img_aug = real_img
-                rec_pred = discriminator2(rec_img)
-                real_pred = discriminator2(real_img)
-                d2_loss_rec = F.softplus(rec_pred).mean()
-                d2_loss_real = F.softplus(-real_pred).mean()
-
-                d2_loss = d2_loss_real + d2_loss_rec
-                loss_dict["d2"] = d2_loss
-                loss_dict["rec_score"] = rec_pred.mean()
-
-                discriminator2.zero_grad()
-                d2_loss.backward()
-                d2_optim.step()
-
-            d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
-            if d_regularize:
-                real_img.requires_grad = True
-                real_pred = discriminator2(real_img)
-                r1_loss = d_r1_loss(real_pred, real_img)
-                discriminator2.zero_grad()
-                (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
-                d2_optim.step()
-            
-            if args.augment and args.augment_p == 0:
-                ada_aug_p2 = ada_augment2.tune(rec_pred)
-                # r_t_stat2 = ada_augment2.r_t_stat
 
         # Train Encoder
         requires_grad(encoder, True)
         requires_grad(generator, True)
         requires_grad(discriminator, False)
-        requires_grad(discriminator2, False)
+        # requires_grad(discriminator2, False)
         pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
         for step_index in range(args.n_step_e):
             real_img = real_imgs[step_index]
@@ -392,18 +375,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             if args.lambda_vgg > 0:
                 vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
             if args.lambda_adv > 0:
-                if not args.decouple_d:
-                    # if args.augment:
-                    #     rec_img_aug, _ = augment(rec_img, ada_aug_p)
-                    # else:
-                    #     rec_img_aug = rec_img
-                    rec_pred = discriminator(rec_img)
-                else:
-                    # if args.augment:
-                    #     rec_img_aug, _ = augment(rec_img, ada_aug_p2)
-                    # else:
-                    #     rec_img_aug = rec_img
-                    rec_pred = discriminator2(rec_img)
+                rec_pred = discriminator(rec_img)
                 adv_loss = g_nonsaturating_loss(rec_pred)
             
             e_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
@@ -415,7 +387,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             encoder.zero_grad()
             generator.zero_grad()
             e_loss.backward()
-            manually_scale_grad(generator, max(0, 1 - ada_aug_p))
+            manually_scale_grad(generator, 1-ada_aug_p)
             e_optim.step()
             g_optim.step()
 
@@ -423,12 +395,10 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         requires_grad(generator, True)
         requires_grad(encoder, False)
         requires_grad(discriminator, False)
-        requires_grad(discriminator2, False)
+        # requires_grad(discriminator2, False)
         real_img = real_imgs[0]
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         fake_img, _ = generator(noise)
-        # if args.augment:
-        #     fake_img, _ = augment(fake_img, ada_aug_p)
         fake_pred = discriminator(fake_img)
         g_loss_fake = g_nonsaturating_loss(fake_pred)
         loss_dict["g"] = g_loss_fake
@@ -466,6 +436,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         path_loss_val = loss_reduced["path"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
+        recx_score_val = loss_reduced["recx_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         pix_loss_val = loss_reduced["pix"].mean().item()
         vgg_loss_val = loss_reduced["vgg"].mean().item()
@@ -489,8 +460,15 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
                     sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
-                            f"ref: {sample_pix_loss.item()}; ada: {ada_aug_p};\n")
+                    f.write(
+                        (
+                            f"{i:07d}; pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; ref: {sample_pix_loss.item():.4f}; "
+                            f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
+                            f"path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
+                            f"augment: {ada_aug_p:.4f}; r_stat: {r_t_stat:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
+                            f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f};\n"
+                        )
+                    )
 
             if args.eval_every > 0 and i % args.eval_every == 0:
                 with torch.no_grad():
@@ -513,18 +491,9 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid_re = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                    # Hybrid FID
-                    if args.eval_hybrid:
-                        features = extract_feature_from_recon_hybrid(
-                            e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                            mode='hybrid', # shuffle_idx=fid_batch_idx
-                        ).numpy()
-                        sample_mean = np.mean(features, 0)
-                        sample_cov = np.cov(features, rowvar=False)
-                        fid_hy = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                 # print("Sample FID:", fid_sa, "Recon FID:", fid_re, "Hybrid FID:", fid_hy)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; sample fid: {float(fid_sa):.4f}; recon fid: {float(fid_re):.4f}; hybrid fid: {float(fid_hy):.4f};\n")
+                    f.write(f"{i:07d}; sample fid: {float(fid_sa):.4f}; recon fid: {float(fid_re):.4f}; \n")
 
             if wandb and args.wandb:
                 wandb.log(
@@ -569,29 +538,6 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         normalize=True,
                         range=(-1, 1),
                     )
-                    # Hybrid samples: [real_y1, real_y2; real_x1, fake_x2]
-                    if args.eval_hybrid:
-                        w1, _ = e_ema(sample_x1)
-                        w2, _ = e_ema(sample_x2)
-                        dw = w2 - w1
-                        dw = torch.cat(dw.chunk(2, 0)[::-1], 0) if sample_idx is None else dw[sample_idx,...]
-                        fake_img, _ = g_ema([w1 + dw], input_is_latent=True, return_latents=False)
-                        drive = torch.cat((
-                            torch.cat(sample_x1.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
-                            torch.cat(sample_x2.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw)), 1)
-                        source = torch.cat((
-                            sample_x1.reshape(args.n_sample, 1, *nchw),
-                            fake_img.reshape(args.n_sample, 1, *nchw)), 1)
-                        sample = torch.cat((
-                            drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
-                            source.reshape(args.n_sample//nrow, 2*nrow, *nchw)), 1)
-                        utils.save_image(
-                            sample.reshape(4*args.n_sample, *nchw),
-                            os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
-                            nrow=2*nrow,
-                            normalize=True,
-                            range=(-1, 1),
-                        )
 
             if i % args.save_every == 0:
                 torch.save(
@@ -730,7 +676,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ada_length",
         type=int,
-        default=500 * 100,
+        default=500 * 1000,
         help="target duraing to reach augmentation probability for adaptive augmentation",
     )
     parser.add_argument(
@@ -769,10 +715,14 @@ if __name__ == "__main__":
     parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
     parser.add_argument("--train_from_scratch", action='store_true')
     parser.add_argument("--ada_pred", type=str, default='recon')
+    parser.add_argument("--ada_margin", type=float, default=0.)
+    parser.add_argument("--limit_train_batches", type=float, default=1)
 
     args = parser.parse_args()
     util.seed_everything()
     args.device = device
+    args.decouple_d = False
+    args.augment = True
 
     n_gpu = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = n_gpu > 1
@@ -975,10 +925,15 @@ if __name__ == "__main__":
             ]
         )
         dataset = datasets.ImageFolder(args.path, transform=transform)
+    if args.limit_train_batches < 1:
+        indices = torch.randperm(len(dataset))[:int(args.limit_train_batches * len(dataset))]
+        dataset1 = data.Subset(dataset, indices)
+    else:
+        dataset1 = dataset
     loader = data.DataLoader(
-        dataset,
+        dataset1,
         batch_size=args.batch,
-        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
+        sampler=data_sampler(dataset1, shuffle=True, distributed=args.distributed),
         drop_last=True,
         num_workers=args.num_workers,
     )

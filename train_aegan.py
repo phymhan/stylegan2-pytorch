@@ -37,6 +37,13 @@ from distributed import (
 from non_leaking import augment, AdaptiveAugment
 
 
+def manually_scale_grad(model, scale):
+    if model is not None:
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad *= scale
+
+
 def data_sampler(dataset, shuffle, distributed):
     if distributed:
         return data.distributed.DistributedSampler(dataset, shuffle=shuffle)
@@ -220,8 +227,8 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
     r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
-    real_diff = 0
-    fake_diff = 0
+    real_diff = fake_diff = count = 0
+    g_scale = 1
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
     if args.decouple_d and args.augment:
@@ -307,13 +314,14 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
 
         with torch.no_grad():
-            real_diff = torch.mean(real_pred - rec_pred).item()
+            real_diff += torch.mean(real_pred - rec_pred).item()
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
             x_fake, _ = generator(noise)
             x_recf, _ = generator([encoder(x_fake)[0]], input_is_latent=True)
             recf_pred = discriminator(x_recf)
             fake_pred = discriminator(x_fake)
-            fake_diff = torch.mean(fake_pred - recf_pred).item()
+            fake_diff += torch.mean(fake_pred - recf_pred).item()
+            count += 1
 
         d_regularize = i % args.d_reg_every == 0
         if d_regularize:
@@ -363,7 +371,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 d2_loss.backward()
                 d2_optim.step()
 
-                real_diff = torch.mean(real_pred - rec_pred).item()
+                real_diff += torch.mean(real_pred - rec_pred).item()
 
             d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
@@ -429,6 +437,9 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 generator.zero_grad()
                 e_loss.backward()
                 e_optim.step()
+                if args.g_decay < 1:
+                    manually_scale_grad(generator, g_scale)
+                    g_scale *= args.g_decay
                 g_optim.step()
             else:
                 encoder.zero_grad()
@@ -513,9 +524,10 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                             f"path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
                             f"augment: {ada_aug_p:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
                             f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f}; "
-                            f"real_diff: {real_diff:.4f}; fake_diff: {fake_diff:.4f};\n"
+                            f"real_diff: {real_diff/count:.4f}; fake_diff: {fake_diff/count:.4f};\n"
                         )
                     )
+                real_diff = fake_diff = count = 0
 
             if args.eval_every > 0 and i % args.eval_every == 0:
                 with torch.no_grad():
@@ -795,6 +807,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_from_scratch", action='store_true')
     parser.add_argument("--limit_train_batches", type=float, default=1)
     parser.add_argument("--no_eval_hybrid", action='store_true')
+    parser.add_argument("--g_decay", type=float, default=1, help="g decay factor")
 
     args = parser.parse_args()
     util.seed_everything()

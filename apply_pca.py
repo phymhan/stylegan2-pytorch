@@ -43,7 +43,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--out_prefix",
         type=str,
-        default="factor",
+        default="pca",
         help="filename prefix to result samples",
     )
     parser.add_argument(
@@ -56,7 +56,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    eigvec = torch.load(args.factor)["eigvec"].to(args.device)
+    eigvec = torch.from_numpy(np.load(args.factor)["comp"]).to(device)
     ckpt = torch.load(args.ckpt)
     g = Generator(args.size, 512, 8, channel_multiplier=args.channel_multiplier).to(args.device)
     g.load_state_dict(ckpt["g_ema"], strict=False)

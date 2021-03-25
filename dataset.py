@@ -5,6 +5,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+import torchvision
 import torchvision.transforms.functional as F
 import pickle
 import os
@@ -14,6 +15,39 @@ import random
 from natsort import natsorted
 
 IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm']
+
+
+class RandomCropLongEdge(object):
+    """
+    this code is borrowed from https://github.com/ajbrock/BigGAN-PyTorch
+    MIT License
+    Copyright (c) 2019 Andy Brock
+    """
+    def __call__(self, img):
+        # PIL size is (width, height), torchvision crop is (height, width)!!!
+        size = (min(img.size), min(img.size))
+        # Only step forward along this edge if it's the long edge
+        i = (0 if size[0] == img.size[0]
+            else np.random.randint(low=0,high=img.size[0] - size[0]))
+        j = (0 if size[1] == img.size[1]
+            else np.random.randint(low=0,high=img.size[1] - size[1]))
+        return transforms.functional.crop(img, j, i, size[0], size[1])
+
+    def __repr__(self):
+        return self.__class__.__name__
+
+
+class CenterCropLongEdge(object):
+    """
+    this code is borrowed from https://github.com/ajbrock/BigGAN-PyTorch
+    MIT License
+    Copyright (c) 2019 Andy Brock
+    """
+    def __call__(self, img):
+        return transforms.functional.center_crop(img, min(img.size))
+
+    def __repr__(self):
+        return self.__class__.__name__
 
 
 def is_image_file(filename):
@@ -185,3 +219,79 @@ class VideoFolderDataset(Dataset):
 
     def __len__(self):
         return self._dataset_length
+
+
+def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True):
+    CropLongEdge = RandomCropLongEdge if train else CenterCropLongEdge
+    dataset = None
+    if which_dataset.lower() in ['cifar10', 'c10']:
+        transform = transforms.Compose(
+            [
+                transforms.Resize(args.size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dataset = torchvision.datasets.CIFAR10(
+            root=data_root, download=True,
+            train=train,
+            transform=transform
+        )
+    elif which_dataset.lower() in ['cifar100', 'c100']:
+        transform = transforms.Compose(
+            [
+                transforms.Resize(args.size),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dataset = torchvision.datasets.CIFAR100(
+            root=data_root, download=True,
+            train=train,
+            transform=transform
+        )
+    elif which_dataset.lower() in ['imagenet', 'ilsvrc2012']:
+        # TODO: save file index, hdf5 or lmdb
+        transform = transforms.Compose(
+            [
+                CropLongEdge(),
+                transforms.Resize(args.size),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dataset = torchvision.datasets.ImageFolder(
+            root=os.path.join(data_root, 'train' if train else 'valid'),
+            transform=transform
+        )
+    elif which_dataset.lower() in ['tiny_imagenet', 'tiny']:
+        transform = transforms.Compose(
+            [
+                transforms.Resize(args.size),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dataset = torchvision.datasets.ImageFolder(
+            root=os.path.join(data_root, 'train' if train else 'test'),
+            transform=transform
+        )
+    elif which_dataset.lower() in ['imagefolder', 'custom']:
+        transform = transforms.Compose(
+            [
+                CropLongEdge(),
+                transforms.Resize(args.size, Image.LANCZOS),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dataset = torchvision.datasets.ImageFolder(
+            root=data_root,
+            transform=transform
+        )
+    else:
+        raise NotImplementedError
+    return dataset

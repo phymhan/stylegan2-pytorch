@@ -223,6 +223,7 @@ class VideoFolderDataset(Dataset):
 
 def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True):
     CropLongEdge = RandomCropLongEdge if train else CenterCropLongEdge
+    random_flip = getattr(args, 'flip', True)
     dataset = None
     if which_dataset.lower() in ['cifar10', 'c10']:
         transform = transforms.Compose(
@@ -256,7 +257,7 @@ def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True)
             [
                 CropLongEdge(),
                 transforms.Resize(args.size),
-                transforms.RandomHorizontalFlip(),
+                transforms.RandomHorizontalFlip(p=0.5 if random_flip else 0),
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
@@ -269,7 +270,7 @@ def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True)
         transform = transforms.Compose(
             [
                 transforms.Resize(args.size),
-                transforms.RandomHorizontalFlip(),
+                transforms.RandomHorizontalFlip(p=0.5 if random_flip else 0),
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
@@ -283,7 +284,7 @@ def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True)
             [
                 CropLongEdge(),
                 transforms.Resize(args.size, Image.LANCZOS),
-                transforms.RandomHorizontalFlip(),
+                transforms.RandomHorizontalFlip(p=0.5 if random_flip else 0),
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]

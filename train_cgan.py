@@ -512,6 +512,9 @@ if __name__ == "__main__":
         default=8,
         help="probability update interval of the adaptive augmentation",
     )
+    parser.add_argument(
+        "--flip", action="store_true", help="apply random flipping to real images"
+    )
     parser.add_argument("--conditional_strategy", type=str, default='ProjGAN')
     parser.add_argument("--n_classes", type=int, default=10)
     parser.add_argument("--n_sample_per_class", type=int, default=8, help="number of the samples per class")
@@ -522,6 +525,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_sample_fid", type=int, default=50000, help="number of the samples for calculating FID")
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--n_step_d", type=int, default=1)
+    parser.add_argument("--embed_is_linear", action='store_true')
 
     args = parser.parse_args()
     util.seed_everything()
@@ -538,6 +542,7 @@ if __name__ == "__main__":
     args.latent = 512
     args.n_mlp = 8
     args.mixing = 0  # disable mixing
+    args.flip = True
 
     args.start_iter = 0
     util.set_log_dir(args)
@@ -547,16 +552,19 @@ if __name__ == "__main__":
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
+        embed_is_linear=args.embed_is_linear,
     ).to(device)
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
+        embed_is_linear=args.embed_is_linear,
     ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
+        embed_is_linear=args.embed_is_linear,
     ).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)

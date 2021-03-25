@@ -13,7 +13,7 @@ from tqdm import tqdm
 from PIL import Image
 
 from inception import InceptionV3
-from dataset import MultiResolutionDataset, VideoFolderDataset
+from dataset import MultiResolutionDataset, VideoFolderDataset, get_image_dataset
 
 
 class Inception3Feature(Inception3):
@@ -100,6 +100,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--flip", action="store_true", help="apply random flipping to real images"
     )
+    parser.add_argument("--eval_type", type=str, default='train')
     parser.add_argument("--name", type=str, default=None, help="name of inception embedding file")
     parser.add_argument("--dataset", type=str, default='multires')
     parser.add_argument("--cache", type=str, default=None)
@@ -141,6 +142,8 @@ if __name__ == "__main__":
             ]
         )
         dset = datasets.ImageFolder(args.path, transform=transform)
+    else:
+        dset = get_image_dataset(args, args.dataset, args.path, train=args.eval_type=='train')
 
     # args.n_sample = min(args.n_sample, len(dset))
     indices = torch.randperm(len(dset))[:args.n_sample]

@@ -53,7 +53,7 @@ if __name__ == '__main__':
     videopaths = []  # a list of list
     for video in videos:
         framepaths = []
-        videoname = video.rstrip('.png').rstrip('.jpg')
+        videoname = video.replace('.png', '').replace('.jpg', '')
         if not os.path.exists(os.path.join(args.dest_data_root, videoname)):
             os.mkdir(os.path.join(args.dest_data_root, videoname))
         videopath = os.path.join(args.raw_data_root, video)

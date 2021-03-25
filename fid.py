@@ -15,8 +15,10 @@ st = pdb.set_trace
 @torch.no_grad()
 def extract_feature_from_samples(
     generator, inception, truncation, truncation_latent, batch_size, n_sample, device,
-    prior=None, samples=None, verbose=False,
+    prior=None, samples=None, verbose=False, n_classes=-1,
 ):
+    # generator is conditional if n_classes > 0
+    conditional = n_classes > 0
     n_batch = n_sample // batch_size
     resid = n_sample - (n_batch * batch_size)
     batch_sizes = [batch_size] * n_batch + [resid] if resid > 0 else [batch_size] * n_batch
@@ -27,6 +29,10 @@ def extract_feature_from_samples(
         if samples is not None:
             img = samples[cnt:cnt+batch,...]
             cnt += batch
+        elif conditional:
+            fake_labels = torch.empty(batch, dtype=torch.long).random_(n_classes).to(device)
+            img, _ = generator([latent], fake_labels,
+                truncation=truncation, truncation_latent=truncation_latent)
         else:
             latent = torch.randn(batch, 512, device=device)
             if prior is None:

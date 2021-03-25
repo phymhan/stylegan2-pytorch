@@ -27,7 +27,7 @@ if __name__ == "__main__":
         default=2,
         help='channel multiplier factor. config-f = 2, else = 1',
     )
-    parser.add_argument("--ckpt", type=str, required=True, help="stylegan2 checkpoints")
+    parser.add_argument("--ckpt", type=str, default=None, help="stylegan2 checkpoints")
     parser.add_argument(
         "--size", type=int, default=256, help="output image size of the generator"
     )
@@ -57,6 +57,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     eigvec = torch.load(args.factor)["eigvec"].to(args.device)
+    if args.ckpt is None:
+        args.ckpt = torch.load(args.factor)["ckpt"]
     ckpt = torch.load(args.ckpt)
     g = Generator(args.size, 512, 8, channel_multiplier=args.channel_multiplier).to(args.device)
     g.load_state_dict(ckpt["g_ema"], strict=False)

@@ -56,7 +56,7 @@ if __name__ == '__main__':
     videos = os.listdir(args.raw_data_root)
     for video in videos:
         mp4path = os.path.join(args.raw_data_root, video)
-        videoname = video.rstrip('.avi')
+        videoname = video.replace('.avi', '')
         clips = get_frames(mp4path, args.image_size, args.every_nth, args.trim_len)
         idx_clip = range(len(clips))
         for j in idx_clip:

@@ -56,7 +56,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    eigvec = torch.from_numpy(np.load(args.factor)["comp"]).to(device)
+    eigvec = torch.from_numpy(np.load(args.factor)["comp"]).float().to(args.device)
+    eigvec = eigvec.t()
     ckpt = torch.load(args.ckpt)
     g = Generator(args.size, 512, 8, channel_multiplier=args.channel_multiplier).to(args.device)
     g.load_state_dict(ckpt["g_ema"], strict=False)

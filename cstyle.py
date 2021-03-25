@@ -771,7 +771,7 @@ class Discriminator(nn.Module):
         out = self.final_conv(out)
         h = out.view(batch, -1)  # h = phi(x), dim is 8192
 
-        out = self.final_linear(h)
+        out = torch.squeeze(self.final_linear(h))
         proj = torch.sum(torch.mul(self.get_label_embedding(labels), h), 1)
 
         return proj + out

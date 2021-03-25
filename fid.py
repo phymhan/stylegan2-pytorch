@@ -30,6 +30,7 @@ def extract_feature_from_samples(
             img = samples[cnt:cnt+batch,...]
             cnt += batch
         elif conditional:
+            latent = torch.randn(batch, 512, device=device)
             fake_labels = torch.empty(batch, dtype=torch.long).random_(n_classes).to(device)
             img, _ = generator([latent], fake_labels,
                 truncation=truncation, truncation_latent=truncation_latent)

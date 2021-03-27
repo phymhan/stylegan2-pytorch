@@ -526,6 +526,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--n_step_d", type=int, default=1)
     parser.add_argument("--embed_is_linear", action='store_true')
+    parser.add_argument("--which_phi", type=str, default='vec')
 
     args = parser.parse_args()
     util.seed_everything()
@@ -559,6 +560,7 @@ if __name__ == "__main__":
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         embed_is_linear=args.embed_is_linear,
+        which_phi=args.which_phi,
     ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,

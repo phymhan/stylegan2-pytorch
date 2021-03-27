@@ -697,7 +697,7 @@ class Discriminator(nn.Module):
         n_classes=10,
         conditional_strategy='ProjGAN',
         embed_is_linear=False,
-        phi_layer='vec',
+        which_phi='vec',
     ):
         """
         which_phi == 'vec': phi(x) is vectorized feature before final_linear

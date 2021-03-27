@@ -697,7 +697,13 @@ class Discriminator(nn.Module):
         n_classes=10,
         conditional_strategy='ProjGAN',
         embed_is_linear=False,
+        phi_layer='vec',
     ):
+        """
+        which_phi == 'vec': phi(x) is vectorized feature before final_linear
+        which_phi == 'avg': phi(x) is AvgPooled feature before final_linear
+        which_phi == 'lin': phi(x) is Linear(feature.view(-1))
+        """
         super().__init__()
 
         channels = {
@@ -715,10 +721,16 @@ class Discriminator(nn.Module):
         self.n_classes = n_classes
         self.conditional_strategy = conditional_strategy
         self.embed_is_linear = embed_is_linear
-        self.embed_dim = channels[4] * 4 * 4
+        self.which_phi = which_phi
+        if self.which_phi == 'vec':
+            self.embed_dim = channels[4] * 4 * 4
+        elif self.which_phi == 'avg':
+            self.embed_dim = channels[4]
+        elif self.which_phi == 'lin':
+            self.embed_dim = channels[4]
         if embed_is_linear:
             self.embedding = EqualLinear(
-                n_classes, self.embed_dim, activation="fused_lrelu"
+                self.embed_dim, n_classes, activation="fused_lrelu"
             )
         else:
             self.embedding = nn.Embedding(n_classes, self.embed_dim)
@@ -743,18 +755,19 @@ class Discriminator(nn.Module):
         self.stddev_feat = 1
 
         self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)
-        self.final_linear = nn.Sequential(
-            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-            EqualLinear(channels[4], 1),
-        )  # final_linear is not linear, TODO: add another final linear, s.t. phi(x) becomes 512
-    
-    def get_label_embedding(self, labels):
-        device = labels.device
-        if self.embed_is_linear:
-            labels = F.one_hot(labels, num_classes=self.n_classes).float().to(device)
-            return self.embedding(labels)
-        else:
-            return self.embedding(labels)
+        if self.which_phi == 'vec':
+            self.final_linear = nn.Sequential(
+                EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+                EqualLinear(channels[4], 1),
+            )  # final_linear is not linear
+        elif self.which_phi == 'avg':
+            self.final_linear = nn.Sequential(
+                EqualLinear(channels[4], channels[4], activation="fused_lrelu"),
+                EqualLinear(channels[4], 1),
+            )
+        elif self.which_phi == 'lin':
+            self.final_linear0 = EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu")
+            self.final_linear = EqualLinear(channels[4], 1),
 
     def forward(self, input, labels=None):
         out = self.convs(input)
@@ -769,11 +782,20 @@ class Discriminator(nn.Module):
         stddev = stddev.repeat(group, 1, height, width)
         out = torch.cat([out, stddev], 1)
         out = self.final_conv(out)
-        h = out.view(batch, -1)  # h = phi(x), dim is 8192
+
+        if self.which_phi == 'vec':  # h = phi(x), dim is 8192
+            h = out.view(batch, -1)
+        elif self.which_phi == 'avg':  # h = phi(x), dim is 512
+            h = torch.sum(out, [2, 3]) / 16.
+        elif self.which_phi == 'lin':  # h = phi(x), dim is 512
+            h = self.final_linear0(out.view(batch, -1))
 
         out = torch.squeeze(self.final_linear(h))
-        proj = torch.sum(torch.mul(self.get_label_embedding(labels), h), 1)
-
+        if self.embed_is_linear:
+            proj = self.embedding(h)[range(batch), labels]
+        else:
+            proj = torch.sum(torch.mul(self.embedding(labels), h), 1)
+        
         return proj + out
 
 

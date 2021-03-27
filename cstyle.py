@@ -763,11 +763,10 @@ class Discriminator(nn.Module):
         elif self.which_phi == 'avg':
             self.final_linear = nn.Sequential(
                 EqualLinear(channels[4], channels[4], activation="fused_lrelu"),
-                EqualLinear(channels[4], 1),
-            )
+                EqualLinear(channels[4], 1))
         elif self.which_phi == 'lin':
             self.final_linear0 = EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu")
-            self.final_linear = EqualLinear(channels[4], 1),
+            self.final_linear = EqualLinear(channels[4], 1)
 
     def forward(self, input, labels=None):
         out = self.convs(input)

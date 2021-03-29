@@ -688,7 +688,12 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], in_channel=3, n_head=1):
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], in_channel=3, which_phi='vec'):
+        """
+        which_phi == 'vec': phi(x) is vectorized feature before final_linear
+        which_phi == 'avg': phi(x) is AvgPooled feature before final_linear
+        which_phi == 'lin': phi(x) is Linear(feature.view(-1))
+        """
         super().__init__()
 
         channels = {
@@ -702,6 +707,14 @@ class Discriminator(nn.Module):
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
         }
+
+        self.which_phi = which_phi
+        if self.which_phi == 'vec':
+            self.embed_dim = channels[4] * 4 * 4
+        elif self.which_phi == 'avg':
+            self.embed_dim = channels[4]
+        else:
+            raise NotImplementedError
 
         convs = [ConvLayer(in_channel, channels[size], 1)]
 
@@ -722,22 +735,18 @@ class Discriminator(nn.Module):
         self.stddev_feat = 1
 
         self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)
-        self.final_linear = nn.Sequential(
-            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-            EqualLinear(channels[4], 1),
-        )
-        self.n_head = n_head
-        self.final_linear_aux = None
-        if n_head > 1:
-            heads = []
-            for i in range(n_head - 1):
-                heads.append(nn.Sequential(
-                    EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-                    EqualLinear(channels[4], 1),
-                ))
-            self.final_linear_aux = nn.ModuleList(heads)
+        if self.which_phi == 'vec':
+            self.final_linear = nn.Sequential(
+                EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+                EqualLinear(channels[4], 1),
+            )
+        elif self.which_phi == 'avg':
+            self.final_linear = nn.Sequential(
+                EqualLinear(channels[4], channels[4], activation="fused_lrelu"),
+                EqualLinear(channels[4], 1),
+            )
 
-    def forward(self, input, detach_aux=True):
+    def forward(self, input):
         out = self.convs(input)
 
         batch, channel, height, width = out.shape
@@ -752,13 +761,12 @@ class Discriminator(nn.Module):
 
         out = self.final_conv(out)
 
-        h = out.view(batch, -1)
-        out = self.final_linear(h)
+        if self.which_phi == 'vec':  # h = phi(x), dim is 8192
+            h = out.view(batch, -1)
+        elif self.which_phi == 'avg':  # h = phi(x), dim is 512
+            h = torch.sum(out, [2, 3]) / 16.
 
-        if self.n_head > 1:
-            if detach_aux:
-                h = h.detach()
-            out = [out] + [self.final_linear_aux[i](h) for i in range(self.n_head-1)]
+        out = self.final_linear(h)
 
         return out
 

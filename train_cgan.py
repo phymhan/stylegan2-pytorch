@@ -25,7 +25,6 @@ try:
 except ImportError:
     wandb = None
 
-from cstyle import Generator, Discriminator
 from dataset import MultiResolutionDataset, get_image_dataset
 from distributed import (
     get_rank,
@@ -552,7 +551,7 @@ if __name__ == "__main__":
     util.print_args(parser, args)
 
     if args.arch == 'stylegan2':
-        from model import Generator, Discriminator
+        from cstyle import Generator, Discriminator
     else:
         raise NotImplementedError
 

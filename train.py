@@ -25,7 +25,7 @@ try:
 except ImportError:
     wandb = None
 
-from dataset import MultiResolutionDataset, VideoFolderDataset
+from dataset import get_image_dataset
 from distributed import (
     get_rank,
     synchronize,
@@ -606,43 +606,8 @@ if __name__ == "__main__":
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
-    dataset = None
-    if args.dataset == 'multires':
-        transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = MultiResolutionDataset(args.path, transform, args.size)
-    elif args.dataset == 'videofolder':
-        # [Note] Potentially, same transforms will be applied to a batch of images,
-        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
-        transform = transforms.Compose(
-            [
-                # transforms.ToTensor(),  # this should be done in loader
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size),  # Image.LANCZOS
-                transforms.CenterCrop(args.size),
-                # transforms.ToTensor(),  # normally placed here
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
-        if len(dataset) == 0:
-            raise ValueError
-    elif args.dataset == 'imagefolder':
-        transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size, Image.LANCZOS),
-                transforms.CenterCrop(args.size),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = datasets.ImageFolder(args.path, transform=transform)
+
+    dataset = get_image_dataset(args, args.dataset, args.path, train=True)
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,

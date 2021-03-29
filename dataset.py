@@ -222,10 +222,48 @@ class VideoFolderDataset(Dataset):
 
 
 def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True):
+    # Define Image Datasets (VideoFolder will be the collection of all frames)
     CropLongEdge = RandomCropLongEdge if train else CenterCropLongEdge
     random_flip = getattr(args, 'flip', True)
     dataset = None
-    if which_dataset.lower() in ['cifar10', 'c10']:
+    if which_dataset.lower() in ['multires']:
+        transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(p=0.5 if random_flip else 0),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
+        dataset = MultiResolutionDataset(data_root, transform, args.size)
+    elif which_dataset.lower() in ['videofolder']:
+        # [Note] Potentially, same transforms will be applied to a batch of images,
+        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
+        transform = transforms.Compose(
+            [
+                # transforms.ToTensor(),  # this should be done in loader
+                transforms.RandomHorizontalFlip(p=0.5 if random_flip else 0),
+                transforms.Resize(args.size),  # Image.LANCZOS
+                transforms.CenterCrop(args.size),
+                # transforms.ToTensor(),  # normally placed here
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
+            ]
+        )
+        dataset = VideoFolderDataset(data_root, transform, mode='image', cache=args.cache)
+    elif which_dataset.lower() in ['imagefolder', 'custom']:
+        transform = transforms.Compose(
+            [
+                CropLongEdge(),
+                transforms.Resize(args.size, Image.LANCZOS),
+                transforms.RandomHorizontalFlip(p=0.5 if random_flip else 0),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dataset = torchvision.datasets.ImageFolder(
+            root=data_root,
+            transform=transform
+        )
+    elif which_dataset.lower() in ['cifar10', 'c10']:
         transform = transforms.Compose(
             [
                 transforms.Resize(args.size),
@@ -277,20 +315,6 @@ def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True)
         )
         dataset = torchvision.datasets.ImageFolder(
             root=os.path.join(data_root, 'train' if train else 'test'),
-            transform=transform
-        )
-    elif which_dataset.lower() in ['imagefolder', 'custom']:
-        transform = transforms.Compose(
-            [
-                CropLongEdge(),
-                transforms.Resize(args.size, Image.LANCZOS),
-                transforms.RandomHorizontalFlip(p=0.5 if random_flip else 0),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            ]
-        )
-        dataset = torchvision.datasets.ImageFolder(
-            root=data_root,
             transform=transform
         )
     else:

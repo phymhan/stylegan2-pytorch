@@ -25,7 +25,6 @@ try:
 except ImportError:
     wandb = None
 
-from model import Generator, Discriminator
 from dataset import MultiResolutionDataset, VideoFolderDataset
 from distributed import (
     get_rank,
@@ -34,6 +33,7 @@ from distributed import (
     reduce_sum,
     get_world_size,
 )
+from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
 
 
@@ -83,9 +83,10 @@ def d_logistic_loss(real_pred, fake_pred):
 
 
 def d_r1_loss(real_pred, real_img):
-    grad_real, = autograd.grad(
-        outputs=real_pred.sum(), inputs=real_img, create_graph=True
-    )
+    with conv2d_gradfix.no_weight_gradients():
+        grad_real, = autograd.grad(
+            outputs=real_pred.sum(), inputs=real_img, create_graph=True
+        )
     grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
 
     return grad_penalty
@@ -237,11 +238,10 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
         if d_regularize:
             real_img.requires_grad = True
-            # if args.augment:
-            #     real_img_aug, _ = augment(real_img, ada_aug_p)
-            # else:
-            #     real_img_aug = real_img
-            real_img_aug = real_img
+            if args.augment:
+                real_img_aug, _ = augment(real_img, ada_aug_p)
+            else:
+                real_img_aug = real_img
             real_pred = discriminator(real_img_aug)
             r1_loss = d_r1_loss(real_pred, real_img)
 
@@ -411,6 +411,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StyleGAN2 trainer")
 
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
+    parser.add_argument("--arch", type=str, default='stylegan2', help="model architectures (stylegan2 | swagan)")
     parser.add_argument("--dataset", type=str, default='multires')
     parser.add_argument("--cache", type=str, default='local.db')
     parser.add_argument("--name", type=str, help="experiment name", default='default_exp')
@@ -534,6 +535,12 @@ if __name__ == "__main__":
     args.start_iter = 0
     util.set_log_dir(args)
     util.print_args(parser, args)
+
+    if args.arch == 'stylegan2':
+        from model import Generator, Discriminator
+
+    elif args.arch == 'swagan':
+        from swagan import Generator, Discriminator
 
     generator = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier

@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Function
 
-from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d, conv2d_gradfix
+from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
 from models.stylegan_layers import EqualizedLinear
 import numpy as np
 import pdb
@@ -115,7 +115,7 @@ class EqualConv2d(nn.Module):
             self.bias = None
 
     def forward(self, input):
-        out = conv2d_gradfix.conv2d(
+        out = F.conv2d(
             input,
             self.weight * self.scale,
             bias=self.bias,
@@ -180,7 +180,6 @@ class ModulatedConv2d(nn.Module):
         upsample=False,
         downsample=False,
         blur_kernel=[1, 3, 3, 1],
-        fused=True,
     ):
         super().__init__()
 
@@ -218,7 +217,6 @@ class ModulatedConv2d(nn.Module):
         self.modulation = EqualLinear(style_dim, in_channel, bias_init=1)
 
         self.demodulate = demodulate
-        self.fused = fused
 
     def __repr__(self):
         return (
@@ -228,35 +226,6 @@ class ModulatedConv2d(nn.Module):
 
     def forward(self, input, style):
         batch, in_channel, height, width = input.shape
-
-        if not self.fused:
-            weight = self.scale * self.weight.squeeze(0)
-            style = self.modulation(style)
-
-            if self.demodulate:
-                w = weight.unsqueeze(0) * style.view(batch, 1, in_channel, 1, 1)
-                dcoefs = (w.square().sum((2, 3, 4)) + 1e-8).rsqrt()
-
-            input = input * style.reshape(batch, in_channel, 1, 1)
-
-            if self.upsample:
-                weight = weight.transpose(0, 1)
-                out = conv2d_gradfix.conv_transpose2d(
-                    input, weight, padding=0, stride=2
-                )
-                out = self.blur(out)
-
-            elif self.downsample:
-                input = self.blur(input)
-                out = conv2d_gradfix.conv2d(input, weight, padding=0, stride=2)
-
-            else:
-                out = conv2d_gradfix.conv2d(input, weight, padding=self.padding)
-
-            if self.demodulate:
-                out = out * dcoefs.view(batch, -1, 1, 1)
-
-            return out
 
         style = self.modulation(style).view(batch, 1, in_channel, 1, 1)
         weight = self.scale * self.weight * style
@@ -277,9 +246,7 @@ class ModulatedConv2d(nn.Module):
             weight = weight.transpose(1, 2).reshape(
                 batch * in_channel, self.out_channel, self.kernel_size, self.kernel_size
             )
-            out = conv2d_gradfix.conv_transpose2d(
-                input, weight, padding=0, stride=2, groups=batch
-            )
+            out = F.conv_transpose2d(input, weight, padding=0, stride=2, groups=batch)
             _, _, height, width = out.shape
             out = out.view(batch, self.out_channel, height, width)
             out = self.blur(out)
@@ -288,17 +255,13 @@ class ModulatedConv2d(nn.Module):
             input = self.blur(input)
             _, _, height, width = input.shape
             input = input.view(1, batch * in_channel, height, width)
-            out = conv2d_gradfix.conv2d(
-                input, weight, padding=0, stride=2, groups=batch
-            )
+            out = F.conv2d(input, weight, padding=0, stride=2, groups=batch)
             _, _, height, width = out.shape
             out = out.view(batch, self.out_channel, height, width)
 
         else:
             input = input.view(1, batch * in_channel, height, width)
-            out = conv2d_gradfix.conv2d(
-                input, weight, padding=self.padding, groups=batch
-            )
+            out = F.conv2d(input, weight, padding=self.padding, groups=batch)
             _, _, height, width = out.shape
             out = out.view(batch, self.out_channel, height, width)
 
@@ -400,35 +363,16 @@ class Generator(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         lr_mlp=0.01,
-        n_classes=10,
-        conditional_strategy='ProjGAN',
-        embed_is_linear=False,
     ):
         super().__init__()
 
         self.size = size
+
         self.style_dim = style_dim
-        self.n_classes = n_classes
-        self.conditional_strategy = conditional_strategy
-        self.embed_is_linear = embed_is_linear
 
-        # Conditional embedding
-        if embed_is_linear:
-            self.embedding = EqualLinear(
-                n_classes, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
-            )
-        else:
-            self.embedding = nn.Embedding(n_classes, style_dim)
-        self.pixel_norm = PixelNorm()
+        layers = [PixelNorm()]
 
-        # layers = [PixelNorm()]  # Normalize concated [z, embed_y] would be too strong?
-        layers = [
-            EqualLinear(
-                style_dim * 2, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
-            ),
-        ]
-
-        for i in range(n_mlp-1):
+        for i in range(n_mlp):
             layers.append(
                 EqualLinear(
                     style_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
@@ -514,28 +458,19 @@ class Generator(nn.Module):
         latent = self.style(latent_in).mean(0, keepdim=True)
 
         return latent
-    
-    def get_label_embedding(self, labels):
-        device = labels.device
-        if self.embed_is_linear:
-            labels = F.one_hot(labels, num_classes=self.n_classes).float().to(device)
-            return self.embedding(labels)
-        else:
-            return self.embedding(labels)
 
-    # def get_latent(self, input):
-    #     shape = input.shape
-    #     if shape[-1] > self.style_dim:
-    #         style = self.style(input.view(-1, self.style_dim))
-    #         style = style.view(*shape)
-    #     else:
-    #         style = self.style(input)
-    #     return style
+    def get_latent(self, input):
+        shape = input.shape
+        if shape[-1] > self.style_dim:
+            style = self.style(input.view(-1, self.style_dim))
+            style = style.view(*shape)
+        else:
+            style = self.style(input)
+        return style
     
     def get_styles(
         self,
         styles,
-        labels=None,
         inject_index=None,
         truncation=1,
         truncation_latent=None,
@@ -544,11 +479,7 @@ class Generator(nn.Module):
         randomize_noise=True,
     ):
         if not input_is_latent:
-            styles = [self.pixel_norm(s) for s in styles]
-            labels = self.get_label_embedding(labels)
-            labels = self.pixel_norm(labels)
-            styles = [torch.cat([s, labels], dim=1) for s in styles]
-            styles = [self.style(s) for s in styles]
+            styles = [self.get_latent(s) for s in styles]
         if noise is None:
             if randomize_noise:
                 noise = [None] * self.num_layers
@@ -579,7 +510,6 @@ class Generator(nn.Module):
     def forward(
         self,
         styles,
-        labels=None,
         return_latents=False,
         inject_index=None,
         truncation=1,
@@ -589,11 +519,7 @@ class Generator(nn.Module):
         randomize_noise=True,
     ):
         if not input_is_latent:  # if `style' is z, then get w = self.style(z)
-            styles = [self.pixel_norm(s) for s in styles]
-            labels = self.get_label_embedding(labels)
-            labels = self.pixel_norm(labels)
-            styles = [torch.cat([s, labels], dim=1) for s in styles]
-            styles = [self.style(s) for s in styles]
+            styles = [self.get_latent(s) for s in styles]
 
         if noise is None:
             if randomize_noise:
@@ -725,22 +651,7 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(
-        self,
-        size,
-        channel_multiplier=2,
-        blur_kernel=[1, 3, 3, 1],
-        in_channel=3,
-        n_classes=10,
-        conditional_strategy='ProjGAN',
-        embed_is_linear=False,
-        which_phi='vec',
-    ):
-        """
-        which_phi == 'vec': phi(x) is vectorized feature before final_linear
-        which_phi == 'avg': phi(x) is AvgPooled feature before final_linear
-        which_phi == 'lin': phi(x) is Linear(feature.view(-1))
-        """
+    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], in_channel=3, n_head=1):
         super().__init__()
 
         channels = {
@@ -754,24 +665,6 @@ class Discriminator(nn.Module):
             512: 32 * channel_multiplier,
             1024: 16 * channel_multiplier,
         }
-
-        self.n_classes = n_classes
-        self.conditional_strategy = conditional_strategy
-        self.embed_is_linear = embed_is_linear
-        self.which_phi = which_phi
-        if self.which_phi == 'vec':
-            self.embed_dim = channels[4] * 4 * 4
-        elif self.which_phi == 'avg':
-            self.embed_dim = channels[4]
-        elif self.which_phi == 'lin':
-            self.embed_dim = channels[4]
-        if embed_is_linear:
-            self.embedding = EqualLinear(
-                self.embed_dim, n_classes, activation="fused_lrelu"
-            )
-        else:
-            self.embedding = nn.Embedding(n_classes, self.embed_dim)
-        self.pixel_norm = PixelNorm()
 
         convs = [ConvLayer(in_channel, channels[size], 1)]
 
@@ -792,20 +685,22 @@ class Discriminator(nn.Module):
         self.stddev_feat = 1
 
         self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)
-        if self.which_phi == 'vec':
-            self.final_linear = nn.Sequential(
-                EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-                EqualLinear(channels[4], 1),
-            )  # final_linear is not linear
-        elif self.which_phi == 'avg':
-            self.final_linear = nn.Sequential(
-                EqualLinear(channels[4], channels[4], activation="fused_lrelu"),
-                EqualLinear(channels[4], 1))
-        elif self.which_phi == 'lin':
-            self.final_linear0 = EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu")
-            self.final_linear = EqualLinear(channels[4], 1)
+        self.final_linear = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+            EqualLinear(channels[4], 1),
+        )
+        self.n_head = n_head
+        self.final_linear_aux = None
+        if n_head > 1:
+            heads = []
+            for i in range(n_head - 1):
+                heads.append(nn.Sequential(
+                    EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+                    EqualLinear(channels[4], 1),
+                ))
+            self.final_linear_aux = nn.ModuleList(heads)
 
-    def forward(self, input, labels=None):
+    def forward(self, input, detach_aux=True):
         out = self.convs(input)
 
         batch, channel, height, width = out.shape
@@ -817,22 +712,47 @@ class Discriminator(nn.Module):
         stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
         stddev = stddev.repeat(group, 1, height, width)
         out = torch.cat([out, stddev], 1)
+
         out = self.final_conv(out)
 
-        if self.which_phi == 'vec':  # h = phi(x), dim is 8192
-            h = out.view(batch, -1)
-        elif self.which_phi == 'avg':  # h = phi(x), dim is 512
-            h = torch.sum(out, [2, 3]) / 16.
-        elif self.which_phi == 'lin':  # h = phi(x), dim is 512
-            h = self.final_linear0(out.view(batch, -1))
+        h = out.view(batch, -1)
+        out = self.final_linear(h)
 
-        out = torch.squeeze(self.final_linear(h))
-        if self.embed_is_linear:
-            proj = self.embedding(h)[range(batch), labels]
+        if self.n_head > 1:
+            if detach_aux:
+                h = h.detach()
+            out = [out] + [self.final_linear_aux[i](h) for i in range(self.n_head-1)]
+
+        return out
+
+
+class LatentDiscriminator(nn.Module):
+    def __init__(self, latent_dim=512, n_mlp=8, hidden_dim=512, use_pixelnorm=False):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        if use_pixelnorm:
+            layers = [PixelNorm()]
         else:
-            proj = torch.sum(torch.mul(self.embedding(labels), h), 1)
-        
-        return proj + out
+            layers = []
+
+        input_dim = latent_dim
+        for i in range(n_mlp):
+            output_dim = 1 if i == n_mlp-1 else hidden_dim
+            layers.append(
+                EqualLinear(
+                    input_dim, output_dim, lr_mul=0.01, activation="fused_lrelu"
+                )
+            )
+            input_dim = output_dim
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, input):
+        # input should be of shape [N, latent_dim]
+        if input.ndim > 2 or input.shape[1] > self.latent_dim:
+            input = input.view(-1, self.latent_dim)
+        out = self.layers(input)
+        return out
 
 
 class LinearResBlock(nn.Module):
@@ -883,6 +803,29 @@ class LatentMLP(nn.Module):
             out = out.view(*shape)
         else:
             out = self.layers(input)
+        return out
+
+
+class LatentPrior(nn.Module):
+    def __init__(self, noise_dim=512, latent_dim=512, hidden_dim=512, n_mlp=8):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        layers = [PixelNorm()]
+
+        input_dim = noise_dim
+        for i in range(n_mlp):
+            output_dim = latent_dim if i == n_mlp-1 else hidden_dim
+            layers.append(
+                EqualLinear(
+                    input_dim, output_dim, lr_mul=0.01, activation="fused_lrelu"
+                )
+            )
+            input_dim = output_dim
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, input):
+        out = self.layers(input)
         return out
 
 
@@ -994,6 +937,308 @@ class Encoder(nn.Module):
             return out_mean, out_logvar
         if self.which_latent == 'w_plus' and reshape:
             out_mean = out_mean.reshape(batch, self.n_latent, self.style_dim)
+        if self.return_tuple:
+            return out_mean, None
+        return out_mean
+
+
+class LSTMPosterior(nn.Module):
+    def __init__(self, latent=512, n_latent=1, latent_full=512, hidden_dim=512, factor_dim=512,
+                 bidirectional=True, conditional=True, concat=False, multi_head=False,
+                 reshape_output=False):
+        """
+        input: latent sequence [N, T, latent]
+        output: f [N, latent]; y [N, T, D]
+
+        single head: f [N, latent_full];      y [N, T, D]
+        multi head : f [N, n_latent, latent]; y [N, T, n_latent, d]
+        """
+        super(LSTMPosterior, self).__init__()
+        self.latent = latent
+        self.n_latent = n_latent
+        self.latent_full = latent_full
+        self.hidden_dim = hidden_dim
+        self.bidirectional = bidirectional
+        self.conditional = conditional
+        self.concat = concat
+        hidden_multiply = 2 if self.bidirectional else 1
+        self.f_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        # TODO: use MLP?
+        # self.f_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, latent_full, lr_mul=0.01, activation="fused_lrelu"),
+        # )
+        gain = np.sqrt(2)
+        self.f_mlp = nn.Sequential(
+            EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+            EqualizedLinear(hidden_dim, latent_full, gain=gain, lrmul=0.01, use_wscale=True),
+        )
+        if conditional and concat:
+            self.y_lstm = nn.LSTM(self.latent_full+self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        else:
+            self.y_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        # TODO: use MLP? or skip?
+        self.y_rnn = nn.RNN(hidden_multiply*hidden_dim, factor_dim, batch_first=True)
+        # self.y_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, factor_dim, lr_mul=0.01, activation="fused_lrelu"),
+        # )
+        self.y_mlp = nn.Sequential(
+            EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+            EqualizedLinear(hidden_dim, factor_dim, gain=gain, lrmul=0.01, use_wscale=True),
+        )
+    
+    def encode_f(self, z_in):
+        # z_in: [N, T, latent_full]
+        lstm_out, _ = self.f_lstm(z_in)
+        if self.bidirectional:
+            backward = lstm_out[:, 0, self.hidden_dim:]
+            frontal = lstm_out[:, -1, :self.hidden_dim]
+            lstm_out = torch.cat((frontal, backward), dim=1)
+        else:
+            lstm_out = lstm_out[:, -1, :]
+        f_out = self.f_mlp(lstm_out)
+        return f_out
+    
+    def encode_y(self, z_in, f):
+        # z_in: [N, T, latent_full]; f: [N, latent_full]
+        f_expand = f.unsqueeze(1).expand(-1, z_in.shape[1], -1)
+        if self.conditional:
+            if self.concat:
+                lstm_out, _ = self.y_lstm(torch.cat((z_in, f_expand), dim=2))
+            else:
+                lstm_out, _ = self.y_lstm(z_in + f_expand)
+        else:
+            lstm_out, _ = self.y_lstm(z_in)
+        y_out, _ = self.y_rnn(lstm_out)
+        # Note that EqualLinear cannot handle tensor of shape [N, T, D]
+        # y_skip = self.y_mlp(lstm_out.contiguous().view(z_in.shape[0]*z_in.shape[1], -1))
+        # y_out = y_out + y_skip.view(z_in.shape[0], z_in.shape[1], -1)
+        # y_out = y_out + self.y_mlp(lstm_out)
+        return y_out + self.y_mlp(lstm_out)
+    
+    def forward(self, z_in):
+        # z_in [N, T, latent] or [N, T, n_latent, latent]
+        if z_in.ndim > 3:
+            z_in = z_in.reshape(z_in.size(0), z_in.size(1), -1)
+        f_out = self.encode_f(z_in)
+        y_out = self.encode_y(z_in, f_out)
+        return f_out, y_out
+
+
+class FactorModule(nn.Module):
+    def __init__(self, in_dim, out_dim, weight=None, n_head=1):
+        """
+        Divide input's in_dim into n_head parts, perform linear transformation
+        and concat results in out_dim.
+        """
+        super().__init__()
+        self.n_head = n_head
+        self.in_dim_each = in_dim // n_head
+        self.out_dim_each = out_dim // n_head
+        self.weight = nn.ParameterList()
+        if weight is None:
+            for i in range(n_head):
+                w = torch.randn(self.out_dim_each, self.in_dim_each)
+                self.weight.append(nn.Parameter(w))
+        else:
+            if weight.ndim == 2:
+                assert(weight.shape[0] == self.out_dim_each and weight.shape[1] == self.in_dim_each)
+                for i in range(n_head):
+                    self.weight.append(nn.Parameter(weight))
+            else:
+                for w in weight:
+                    assert(w.shape[0] == self.out_dim_each and w.shape[1] == self.in_dim_each)
+                    self.weight.append(nn.Parameter(w))
+        # self.weight = nn.Parameter(weight)
+
+    def forward(self, input):
+        # input [N, T, D] or [N, D]
+        inputs = torch.split(input, self.in_dim_each, input.ndim-1)
+        outputs = []
+        for i in range(self.n_head):
+            outputs.append(F.linear(inputs[i], self.weight[i]))
+        return torch.cat(outputs, input.ndim-1)
+
+
+class LSTMPosteriorDebug(nn.Module):
+    def __init__(self, latent=512, n_latent=1, latent_full=512, hidden_dim=512, factor_dim=512,
+                 bidirectional=True, conditional=True, concat=False, multi_head=False,
+                 reshape_output=False):
+        """
+        input: latent sequence [N, T, latent]
+        output: f [N, latent]; y [N, T, D]
+
+        single head: f [N, latent_full];      y [N, T, D]
+        multi head : f [N, n_latent, latent]; y [N, T, n_latent, d]
+        """
+        super(LSTMPosteriorDebug, self).__init__()
+        self.latent = latent
+        self.n_latent = n_latent
+        self.latent_full = latent_full
+        self.hidden_dim = hidden_dim
+        self.bidirectional = bidirectional
+        self.conditional = conditional
+        self.concat = concat
+        hidden_multiply = 2 if self.bidirectional else 1
+        # self.f_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        # TODO: use MLP?
+        # self.f_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, latent_full, lr_mul=0.01, activation="fused_lrelu"),
+        # )
+        gain = np.sqrt(2)
+        # self.f_mlp = nn.Sequential(
+        #     EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+        #     EqualizedLinear(hidden_dim, latent_full, gain=gain, lrmul=0.01, use_wscale=True),
+        # )
+        if conditional and concat:
+            self.y_lstm = nn.LSTM(self.latent_full+self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        else:
+            self.y_lstm = nn.LSTM(self.latent_full, hidden_dim, 1, bidirectional=bidirectional, batch_first=True)
+        # TODO: use MLP? or skip?
+        # self.y_rnn = nn.RNN(hidden_multiply*hidden_dim, factor_dim, batch_first=True)
+        # self.y_mlp = nn.Sequential(
+        #     EqualLinear(hidden_multiply*hidden_dim, hidden_dim, lr_mul=0.01, activation="fused_lrelu"),
+        #     EqualLinear(hidden_dim, factor_dim, lr_mul=0.01, activation="fused_lrelu"),
+        # )
+        self.y_mlp = nn.Sequential(
+            EqualizedLinear(hidden_multiply*hidden_dim, hidden_dim, gain=gain, lrmul=0.01, use_wscale=True),
+            EqualizedLinear(hidden_dim, factor_dim, gain=gain, lrmul=0.01, use_wscale=True),
+        )
+    
+    def encode_f(self, z_in):
+        # z_in: [N, T, latent_full]
+        # lstm_out, _ = self.f_lstm(z_in)
+        # if self.bidirectional:
+        #     backward = lstm_out[:, 0, self.hidden_dim:]
+        #     frontal = lstm_out[:, -1, :self.hidden_dim]
+        #     lstm_out = torch.cat((frontal, backward), dim=1)
+        # else:
+        #     lstm_out = lstm_out[:, -1, :]
+        # f_out = self.f_mlp(lstm_out)
+        f_out = z_in[:, 0, :]
+        return f_out
+    
+    # def encode_y(self, z_in, f):
+    #     # z_in: [N, T, latent_full]; f: [N, latent_full]
+    #     # f_expand = f.unsqueeze(1).expand(-1, z_in.shape[1], -1)
+    #     lstm_out, _ = self.y_lstm(z_diff)
+    #     # y_out, _ = self.y_rnn(lstm_out)
+    #     # Note that EqualLinear cannot handle tensor of shape [N, T, D]
+    #     # y_skip = self.y_mlp(lstm_out.contiguous().view(z_in.shape[0]*z_in.shape[1], -1))
+    #     # y_out = y_out + y_skip.view(z_in.shape[0], z_in.shape[1], -1)
+    #     # y_out = y_out + self.y_mlp(lstm_out)
+    #     y_out = self.y_mlp(lstm_out)
+    #     return 0.2*y_out + z_diff
+
+    def encode_y(self, z_in, f):
+        lstm_out, _ = self.y_lstm(z_in)
+        y_out = self.y_mlp(lstm_out)
+        return y_out
+    
+    def forward(self, z_in):
+        # z_in [N, T, latent] or [N, T, n_latent, latent]
+        if z_in.ndim > 3:
+            z_in = z_in.reshape(z_in.size(0), z_in.size(1), -1)
+        f_out = self.encode_f(z_in)
+        y_out = self.encode_y(z_in, f_out)
+        return f_out, y_out
+
+
+class EncoderDebug(nn.Module):
+    def __init__(
+        self,
+        size,
+        style_dim=512,
+        channel_multiplier=2,
+        blur_kernel=[1, 3, 3, 1],
+        which_latent='w_plus',
+        reshape_latent=False,
+        stddev_group=4,
+        stddev_feat=1,
+        reparameterization=False,
+        return_tuple=True,  # backward compatibility
+        n_mlp=8,
+        use_residual=False,
+    ):
+        """
+        which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
+          a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
+          'wb_shared' predict shared w and different biases.
+        """
+        super().__init__()
+
+        channels = {
+            4: 512,
+            8: 512,
+            16: 512,
+            32: 512,
+            64: 256 * channel_multiplier,
+            128: 128 * channel_multiplier,
+            256: 64 * channel_multiplier,
+            512: 32 * channel_multiplier,
+            1024: 16 * channel_multiplier,
+        }
+
+        convs = [ConvLayer(3, channels[size], 1)]
+
+        log_size = int(math.log(size, 2))
+        self.n_latent = log_size * 2 - 2  # copied from Generator
+        self.n_noises = (log_size - 2) * 2 + 1
+        self.which_latent = which_latent
+        self.reshape_latent = reshape_latent
+        self.style_dim = style_dim
+        self.reparameterization = reparameterization
+        self.return_tuple = return_tuple
+
+        in_channel = channels[size]
+
+        for i in range(log_size, 2, -1):
+            out_channel = channels[2 ** (i - 1)]
+
+            convs.append(ResBlock(in_channel, out_channel, blur_kernel))
+
+            in_channel = out_channel
+
+        self.convs = nn.Sequential(*convs)
+
+        self.stddev_group = stddev_group
+        self.stddev_feat = stddev_feat
+
+        self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
+        if self.which_latent == 'w_plus':
+            out_channel = style_dim * self.n_latent
+        elif self.which_latent == 'w_shared':
+            out_channel = style_dim
+        else:
+            raise NotImplementedError
+        self.final_linear = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+            EqualLinear(channels[4], out_channel),
+        )
+        self.latent_mlp = LatentMLP(style_dim, n_mlp, use_residual)
+
+    def forward(self, input):
+        out = self.convs(input)
+        batch = out.shape[0]
+
+        if self.stddev_group > 1:
+            batch, channel, height, width = out.shape
+            group = min(batch, self.stddev_group)
+            stddev = out.view(
+                group, -1, self.stddev_feat, channel // self.stddev_feat, height, width
+            )
+            stddev = torch.sqrt(stddev.var(0, unbiased=False) + 1e-8)
+            stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
+            stddev = stddev.repeat(group, 1, height, width)
+            out = torch.cat([out, stddev], 1)
+
+        out = self.final_conv(out)
+
+        out = out.view(batch, -1)
+        out_mean = self.final_linear(out)
+        out_mean = self.latent_mlp(out_mean)
         if self.return_tuple:
             return out_mean, None
         return out_mean

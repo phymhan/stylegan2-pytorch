@@ -98,6 +98,22 @@ def str2list(attr_bins):
         attr_bins = ast.literal_eval(attr_bins)
     return attr_bins
 
+
+def str2bool(v):
+    """
+    borrowed from:
+    https://stackoverflow.com/questions/715417/converting-from-a-string-to-boolean-in-python
+    :param v:
+    :return: bool(v)
+    """
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def get_nframe_num(args):
     if args.nframe_num_range and args.nframe_iter_range:
         nframe_num_list = (

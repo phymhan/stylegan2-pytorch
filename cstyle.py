@@ -325,11 +325,31 @@ class ConstantInput(nn.Module):
 
         self.input = nn.Parameter(torch.randn(1, channel, size, size))
 
-    def forward(self, input):
+    def forward(self, input, labels=None):
         batch = input.shape[0]
         out = self.input.repeat(batch, 1, 1, 1)
 
         return out
+
+
+class ConditionalInput(nn.Module):
+    def __init__(self, channel, size=4, lr_mlp=0.01, n_classes=10, embedding=None):
+        super().__init__()
+
+        self.channel = channel
+        self.size = size
+        if embedding is None:
+            embedding = nn.Embedding(n_classes, channel)
+        self.embedding = embedding
+        self.input = EqualLinear(
+            channel, channel * size * size, lr_mul=lr_mlp, activation="fused_lrelu"
+        )
+
+    def forward(self, input, labels=None):
+        emb_y = self.embedding(labels)
+        out = self.input(emb_y)
+
+        return out.reshape(-1, self.channel, self.size, self.size)
 
 
 class StyledConv(nn.Module):
@@ -403,6 +423,9 @@ class Generator(nn.Module):
         n_classes=10,
         conditional_strategy='ProjGAN',
         embed_is_linear=False,
+        conditional_noise=True,  # [z, y] --> w
+        conditional_style=False,  # w + y --> w
+        conditional_input=False,  # input(y)
     ):
         super().__init__()
 
@@ -411,6 +434,9 @@ class Generator(nn.Module):
         self.n_classes = n_classes
         self.conditional_strategy = conditional_strategy
         self.embed_is_linear = embed_is_linear
+        self.conditional_noise = conditional_noise
+        self.conditional_style = conditional_style
+        self.conditional_input = conditional_input
 
         # Conditional embedding
         if embed_is_linear:
@@ -421,14 +447,13 @@ class Generator(nn.Module):
             self.embedding = nn.Embedding(n_classes, style_dim)
         self.pixel_norm = PixelNorm()
 
-        # layers = [PixelNorm()]  # Normalize concated [z, embed_y] would be too strong?
-        layers = [
-            EqualLinear(
-                style_dim * 2, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
-            ),
-        ]
+        if self.conditional_noise:
+            layers = [EqualLinear(style_dim * 2, style_dim, lr_mul=lr_mlp, activation="fused_lrelu")]
+            n_mlp -= 1
+        else:
+            layers = [PixelNorm()]
 
-        for i in range(n_mlp-1):
+        for i in range(n_mlp):
             layers.append(
                 EqualLinear(
                     style_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
@@ -449,7 +474,10 @@ class Generator(nn.Module):
             1024: 16 * channel_multiplier,
         }
 
-        self.input = ConstantInput(self.channels[4])
+        if self.conditional_input:
+            self.input = ConditionalInput(self.channels[4], 4, lr_mlp, n_classes, self.embedding)
+        else:
+            self.input = ConstantInput(self.channels[4])
         self.conv1 = StyledConv(
             self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel
         )
@@ -523,59 +551,6 @@ class Generator(nn.Module):
         else:
             return self.embedding(labels)
 
-    # def get_latent(self, input):
-    #     shape = input.shape
-    #     if shape[-1] > self.style_dim:
-    #         style = self.style(input.view(-1, self.style_dim))
-    #         style = style.view(*shape)
-    #     else:
-    #         style = self.style(input)
-    #     return style
-    
-    def get_styles(
-        self,
-        styles,
-        labels=None,
-        inject_index=None,
-        truncation=1,
-        truncation_latent=None,
-        input_is_latent=False,
-        noise=None,
-        randomize_noise=True,
-    ):
-        if not input_is_latent:
-            styles = [self.pixel_norm(s) for s in styles]
-            labels = self.get_label_embedding(labels)
-            labels = self.pixel_norm(labels)
-            styles = [torch.cat([s, labels], dim=1) for s in styles]
-            styles = [self.style(s) for s in styles]
-        if noise is None:
-            if randomize_noise:
-                noise = [None] * self.num_layers
-            else:
-                noise = [getattr(self.noises, f"noise_{i}") for i in range(self.num_layers)]
-        if truncation < 1:
-            style_t = []
-            for style in styles:
-                style_t.append(truncation_latent + truncation * (style - truncation_latent))
-            styles = style_t
-        if len(styles) < 2:  # no mixing
-            inject_index = self.n_latent
-            if styles[0].ndim < 3:  # w is of dim [batch, 512], repeat at dim 1 for each block
-                if styles[0].shape[1] == self.style_dim:
-                    latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-                else:
-                    latent = styles[0].view(styles[0].shape[0], -1, self.style_dim)
-            else:  # w is of dim [batch, n_latent, 512]
-                latent = styles[0]
-        else:  # mixing
-            if inject_index is None:
-                inject_index = random.randint(1, self.n_latent - 1)
-            latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-            latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
-            latent = torch.cat([latent, latent2], 1)
-        return latent
-
     def forward(
         self,
         styles,
@@ -588,11 +563,16 @@ class Generator(nn.Module):
         noise=None,
         randomize_noise=True,
     ):
-        if not input_is_latent:  # if `style' is z, then get w = self.style(z)
-            styles = [self.pixel_norm(s) for s in styles]
-            labels = self.get_label_embedding(labels)
-            labels = self.pixel_norm(labels)
-            styles = [torch.cat([s, labels], dim=1) for s in styles]
+        device = labels.device
+        if self.embed_is_linear:
+            labels = F.one_hot(labels, num_classes=self.n_classes).float().to(device)
+        if not input_is_latent:
+            # styles now is noise
+            if self.conditional_noise:
+                styles = [self.pixel_norm(s) for s in styles]
+                emb_y = self.embedding(labels)
+                emb_y = self.pixel_norm(emb_y)
+                styles = [torch.cat([s, emb_y], dim=1) for s in styles]
             styles = [self.style(s) for s in styles]
 
         if noise is None:
@@ -633,8 +613,11 @@ class Generator(nn.Module):
             latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
 
             latent = torch.cat([latent, latent2], 1)
+        
+        if self.conditional_style:
+            latent = latent + self.embedding(labels).unsqueeze(1).repeat(1, self.n_latent, 1)
 
-        out = self.input(latent)  # only batch_size of latent is used
+        out = self.input(latent, labels)  # only batch_size of latent is used
         out = self.conv1(out, latent[:, 0], noise=noise[0])
 
         skip = self.to_rgb1(out, latent[:, 1])

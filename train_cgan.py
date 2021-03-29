@@ -528,6 +528,9 @@ if __name__ == "__main__":
     parser.add_argument("--n_step_d", type=int, default=1)
     parser.add_argument("--embed_is_linear", action='store_true')
     parser.add_argument("--which_phi", type=str, default='vec')
+    parser.add_argument("--conditional_noise", type=util.str2bool, default=True)
+    parser.add_argument("--conditional_style", type=util.str2bool, default=False)
+    parser.add_argument("--conditional_input", type=util.str2bool, default=False)
 
     args = parser.parse_args()
     util.seed_everything()
@@ -560,6 +563,9 @@ if __name__ == "__main__":
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         embed_is_linear=args.embed_is_linear,
+        conditional_noise=args.conditional_noise,
+        conditional_style=args.conditional_style,
+        conditional_input=args.conditional_input,
     ).to(device)
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier,
@@ -573,6 +579,9 @@ if __name__ == "__main__":
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         embed_is_linear=args.embed_is_linear,
+        conditional_noise=args.conditional_noise,
+        conditional_style=args.conditional_style,
+        conditional_input=args.conditional_input,
     ).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)

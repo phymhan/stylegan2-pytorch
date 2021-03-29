@@ -25,7 +25,7 @@ try:
 except ImportError:
     wandb = None
 
-from dataset import MultiResolutionDataset, get_image_dataset
+from dataset import get_image_dataset
 from distributed import (
     get_rank,
     synchronize,
@@ -629,6 +629,7 @@ if __name__ == "__main__":
             output_device=args.local_rank,
             broadcast_buffers=False,
         )
+
     dataset = get_image_dataset(args, args.dataset, args.path, train=True)
     loader = data.DataLoader(
         dataset,

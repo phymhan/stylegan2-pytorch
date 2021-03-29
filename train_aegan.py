@@ -25,7 +25,7 @@ try:
 except ImportError:
     wandb = None
 
-from dataset import MultiResolutionDataset, VideoFolderDataset
+from dataset import get_image_dataset
 from distributed import (
     get_rank,
     synchronize,
@@ -70,17 +70,13 @@ def accumulate(model1, model2, decay=0.999):
 
 
 def sample_data(loader):
-    # Endless iterator
+    # Endless image iterator
     while True:
         for batch in loader:
-            yield batch
-
-
-def sample_data2(loader):
-    # image and label pair
-    while True:
-        for batch, _ in loader:
-            yield batch
+            if isinstance(batch, (list, tuple)):
+                yield batch[0]
+            else:
+                yield batch
 
 
 def d_logistic_loss(real_pred, fake_pred):
@@ -189,10 +185,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                 f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
 
-    if args.dataset == 'imagefolder':
-        loader = sample_data2(loader)
-    else:
-        loader = sample_data(loader)
+    loader = sample_data(loader)
     pbar = range(args.iter)
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
@@ -983,44 +976,9 @@ if __name__ == "__main__":
                 output_device=args.local_rank,
                 broadcast_buffers=False,
             )
+
     args.eval_hybrid = not args.no_eval_hybrid and args.dataset == 'videofolder'
-    dataset = None
-    if args.dataset == 'multires':
-        transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = MultiResolutionDataset(args.path, transform, args.size)
-    elif args.dataset == 'videofolder':
-        # [Note] Potentially, same transforms will be applied to a batch of images,
-        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
-        transform = transforms.Compose(
-            [
-                # transforms.ToTensor(),  # this should be done in loader
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size),  # Image.LANCZOS
-                transforms.CenterCrop(args.size),
-                # transforms.ToTensor(),  # normally placed here
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = VideoFolderDataset(args.path, transform, mode='image', cache=args.cache)
-        if len(dataset) == 0:
-            raise ValueError
-    elif args.dataset == 'imagefolder':
-        transform = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size, Image.LANCZOS),
-                transforms.CenterCrop(args.size),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = datasets.ImageFolder(args.path, transform=transform)
+    dataset = get_image_dataset(args, args.dataset, args.path, train=True)
     if args.limit_train_batches < 1:
         indices = torch.randperm(len(dataset))[:int(args.limit_train_batches * len(dataset))]
         dataset1 = data.Subset(dataset, indices)

@@ -62,17 +62,13 @@ def accumulate(model1, model2, decay=0.999):
 
 
 def sample_data(loader):
-    # Endless iterator
+    # Endless image iterator
     while True:
         for batch in loader:
-            yield batch
-
-
-def sample_data2(loader):
-    # Endless iterator
-    while True:
-        for batch, _ in loader:
-            yield batch
+            if isinstance(batch, (list, tuple)):
+                yield batch[0]
+            else:
+                yield batch
 
 
 def d_logistic_loss(real_pred, fake_pred):
@@ -154,10 +150,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                 f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
 
-    if args.dataset == 'imagefolder':
-        loader = sample_data2(loader)
-    else:
-        loader = sample_data(loader)
+    loader = sample_data(loader)
     pbar = range(args.iter)
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
@@ -196,17 +189,12 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
             break
 
-        # real_img = next(loader)
-        # real_img = real_img.to(device)
-        # real_imgs = [next(loader).to(device) for _ in range(args.n_step_d)]
-
         # Train Discriminator
         requires_grad(generator, False)
         requires_grad(discriminator, True)
 
         for step_index in range(args.n_step_d):
             real_img = next(loader).to(device)
-            # real_img = real_imgs[step_index]
 
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
             fake_img, _ = generator(noise)

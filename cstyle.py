@@ -9,7 +9,6 @@ from torch.nn import functional as F
 from torch.autograd import Function
 
 from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d, conv2d_gradfix
-from op import ConditionalFusedLeakyReLU
 from models.stylegan_layers import EqualizedLinear
 import numpy as np
 import functools
@@ -159,8 +158,9 @@ class EqualLinear(nn.Module):
             out = fused_leaky_relu(out, self.bias * self.lr_mul)
 
         else:
+            bias = None if self.bias is None else self.bias * self.lr_mul
             out = F.linear(
-                input, self.weight * self.scale, bias=self.bias * self.lr_mul if self.bias else None
+                input, self.weight * self.scale, bias=bias
             )
 
         return out
@@ -388,7 +388,9 @@ class StyledConv(nn.Module):
         out = self.noise(out, noise=noise)
         # out = out + self.bias
         if self.conditional_bias:
-            out = out + self.bias(labels)
+            bias = self.bias(labels)
+            rest_dim = [1] * (out.ndim - bias.ndim)
+            out = out + bias.view(bias.shape[0], bias.shape[1], *rest_dim)
         out = self.activate(out)
 
         return out

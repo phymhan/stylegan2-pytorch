@@ -160,7 +160,7 @@ class EqualLinear(nn.Module):
 
         else:
             out = F.linear(
-                input, self.weight * self.scale, bias=self.bias * self.lr_mul
+                input, self.weight * self.scale, bias=self.bias * self.lr_mul if self.bias else None
             )
 
         return out
@@ -380,20 +380,16 @@ class StyledConv(nn.Module):
         # self.activate = ScaledLeakyReLU(0.2)
         self.conditional_bias = bias_linear is not None
         if self.conditional_bias:
-            self.activate = ConditionalFusedLeakyReLU(
-                out_channel, bias=bias_linear(out_channel)
-            )
-        else:
-            self.activate = FusedLeakyReLU(out_channel)
+            self.bias = bias_linear(out_dim=out_channel)
+        self.activate = FusedLeakyReLU(out_channel)
 
     def forward(self, input, style, noise=None, labels=None):
         out = self.conv(input, style)
         out = self.noise(out, noise=noise)
         # out = out + self.bias
         if self.conditional_bias:
-            out = self.activate(out, labels)
-        else:
-            out = self.activate(out)
+            out = out + self.bias(labels)
+        out = self.activate(out)
 
         return out
 
@@ -420,8 +416,9 @@ class ToRGB(nn.Module):
         return out
 
 
-class OneHot(object):
+class OneHot(nn.Module):
     def __init__(self, n_classes=10):
+        super(OneHot, self).__init__()
         self.n_classes = n_classes
 
     def forward(self, labels):

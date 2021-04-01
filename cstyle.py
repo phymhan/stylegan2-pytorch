@@ -420,7 +420,7 @@ class ToRGB(nn.Module):
         return out
 
 
-class OneHot(nn.Module):
+class OneHot(object):
     def __init__(self, n_classes=10):
         self.n_classes = n_classes
 

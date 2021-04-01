@@ -5,7 +5,6 @@ from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Function
 from torch.utils.cpp_extension import load
-from model import EqualLinear
 
 
 module_path = os.path.dirname(__file__)
@@ -125,7 +124,7 @@ class ConditionalFusedLeakyReLU(nn.Module):
         super().__init__()
 
         if bias is None:
-            self.bias = EqualLinear(embed_dim, channel, bias=False, activation=None)
+            self.bias = nn.Linear(embed_dim, channel, bias=False)
 
         else:
             self.bias = bias

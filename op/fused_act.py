@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Function
 from torch.utils.cpp_extension import load
+from model import EqualLinear
 
 
 module_path = os.path.dirname(__file__)
@@ -117,3 +118,20 @@ def fused_leaky_relu(input, bias=None, negative_slope=0.2, scale=2 ** 0.5):
 
     else:
         return FusedLeakyReLUFunction.apply(input, bias, negative_slope, scale)
+
+
+class ConditionalFusedLeakyReLU(nn.Module):
+    def __init__(self, channel, bias=None, negative_slope=0.2, scale=2 ** 0.5, embed_dim=512):
+        super().__init__()
+
+        if bias is None:
+            self.bias = EqualLinear(embed_dim, channel, bias=False, activation=None)
+
+        else:
+            self.bias = bias
+
+        self.negative_slope = negative_slope
+        self.scale = scale
+
+    def forward(self, input, labels=None):
+        return fused_leaky_relu(input, self.bias(labels), self.negative_slope, self.scale)

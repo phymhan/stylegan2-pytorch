@@ -9,8 +9,10 @@ from torch.nn import functional as F
 from torch.autograd import Function
 
 from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d, conv2d_gradfix
+from op import ConditionalFusedLeakyReLU
 from models.stylegan_layers import EqualizedLinear
 import numpy as np
+import functools
 import pdb
 st = pdb.set_trace
 
@@ -333,21 +335,18 @@ class ConstantInput(nn.Module):
 
 
 class ConditionalInput(nn.Module):
-    def __init__(self, channel, size=4, lr_mlp=0.01, n_classes=10, embedding=None):
+    def __init__(self, channel, size=4, lr_mlp=0.01, embed_dim=512):
         super().__init__()
 
         self.channel = channel
         self.size = size
-        if embedding is None:
-            embedding = nn.Embedding(n_classes, channel)
-        self.embedding = embedding
         self.input = EqualLinear(
-            channel, channel * size * size, lr_mul=lr_mlp, activation="fused_lrelu"
+            embed_dim, channel * size * size, lr_mul=lr_mlp,
+            # activation="fused_lrelu",
         )
 
-    def forward(self, input, labels=None):
-        emb_y = self.embedding(labels)
-        out = self.input(emb_y)
+    def forward(self, input, labels):
+        out = self.input(labels)
 
         return out.reshape(-1, self.channel, self.size, self.size)
 
@@ -362,6 +361,7 @@ class StyledConv(nn.Module):
         upsample=False,
         blur_kernel=[1, 3, 3, 1],
         demodulate=True,
+        bias_linear=None,  # linear(embed) -> out_channel
     ):
         super().__init__()
 
@@ -378,13 +378,22 @@ class StyledConv(nn.Module):
         self.noise = NoiseInjection()
         # self.bias = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
         # self.activate = ScaledLeakyReLU(0.2)
-        self.activate = FusedLeakyReLU(out_channel)
+        self.conditional_bias = bias_linear is not None
+        if self.conditional_bias:
+            self.activate = ConditionalFusedLeakyReLU(
+                out_channel, bias=bias_linear(out_channel)
+            )
+        else:
+            self.activate = FusedLeakyReLU(out_channel)
 
-    def forward(self, input, style, noise=None):
+    def forward(self, input, style, noise=None, labels=None):
         out = self.conv(input, style)
         out = self.noise(out, noise=noise)
         # out = out + self.bias
-        out = self.activate(out)
+        if self.conditional_bias:
+            out = self.activate(out, labels)
+        else:
+            out = self.activate(out)
 
         return out
 
@@ -411,6 +420,16 @@ class ToRGB(nn.Module):
         return out
 
 
+class OneHot(nn.Module):
+    def __init__(self, n_classes=10):
+        self.n_classes = n_classes
+
+    def forward(self, labels):
+        device = labels.device
+        labels = F.one_hot(labels, num_classes=self.n_classes).float().to(device)
+        return labels
+
+
 class Generator(nn.Module):
     def __init__(
         self,
@@ -423,9 +442,10 @@ class Generator(nn.Module):
         n_classes=10,
         conditional_strategy='ProjGAN',
         embed_is_linear=False,
-        conditional_noise=True,  # [z, y] --> w
+        conditional_noise=True,   # [z, y] --> w
         conditional_style=False,  # w + y --> w
         conditional_input=False,  # input(y)
+        conditional_fused=False,  # bias(y) in fused leaky relu
     ):
         super().__init__()
 
@@ -437,18 +457,37 @@ class Generator(nn.Module):
         self.conditional_noise = conditional_noise
         self.conditional_style = conditional_style
         self.conditional_input = conditional_input
+        self.conditional_fused = conditional_fused
 
         # Conditional embedding
+        lr_emb = 1.
+        self.embed_dim = style_dim
         if embed_is_linear:
-            self.embedding = EqualLinear(
-                n_classes, style_dim, lr_mul=lr_mlp, activation="fused_lrelu"
+            self.shared = nn.Sequential(
+                OneHot(n_classes),
+                EqualLinear(
+                    n_classes, style_dim, lr_mul=lr_emb, # activation="fused_lrelu"
+                ),
+            )
+            
+        else:
+            self.shared = nn.Embedding(n_classes, style_dim)
+        
+        if self.conditional_fused:
+            bias_linear = functools.partial(
+                EqualLinear,
+                in_dim=self.embed_dim,
+                bias=False,
+                lr_mul=lr_emb,
+                activation=None,
             )
         else:
-            self.embedding = nn.Embedding(n_classes, style_dim)
+            bias_linear = None
+        
         self.pixel_norm = PixelNorm()
 
         if self.conditional_noise:
-            layers = [EqualLinear(style_dim * 2, style_dim, lr_mul=lr_mlp, activation="fused_lrelu")]
+            layers = [EqualLinear(style_dim + self.embed_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu")]
             n_mlp -= 1
         else:
             layers = [PixelNorm()]
@@ -475,11 +514,12 @@ class Generator(nn.Module):
         }
 
         if self.conditional_input:
-            self.input = ConditionalInput(self.channels[4], 4, lr_mlp, n_classes, self.embedding)
+            self.input = ConditionalInput(self.channels[4], 4, lr_mlp, self.embed_dim)
         else:
             self.input = ConstantInput(self.channels[4])
         self.conv1 = StyledConv(
-            self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel
+            self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel,
+            bias_linear=bias_linear,
         )
         self.to_rgb1 = ToRGB(self.channels[4], style_dim, upsample=False)
 
@@ -509,12 +549,14 @@ class Generator(nn.Module):
                     style_dim,
                     upsample=True,
                     blur_kernel=blur_kernel,
+                    bias_linear=bias_linear,
                 )
             )
 
             self.convs.append(
                 StyledConv(
-                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel
+                    out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel,
+                    bias_linear=bias_linear
                 )
             )
 
@@ -542,14 +584,6 @@ class Generator(nn.Module):
         latent = self.style(latent_in).mean(0, keepdim=True)
 
         return latent
-    
-    def get_label_embedding(self, labels):
-        device = labels.device
-        if self.embed_is_linear:
-            labels = F.one_hot(labels, num_classes=self.n_classes).float().to(device)
-            return self.embedding(labels)
-        else:
-            return self.embedding(labels)
 
     def forward(
         self,
@@ -562,17 +596,17 @@ class Generator(nn.Module):
         input_is_latent=False,
         noise=None,
         randomize_noise=True,
+        label_is_embeding=False,
     ):
-        device = labels.device
-        if self.embed_is_linear:
-            labels = F.one_hot(labels, num_classes=self.n_classes).float().to(device)
+        if not label_is_embeding:
+            labels = self.shared(labels)
+
         if not input_is_latent:
-            # styles now is noise
+            # styles is noise
             if self.conditional_noise:
                 styles = [self.pixel_norm(s) for s in styles]
-                emb_y = self.embedding(labels)
-                emb_y = self.pixel_norm(emb_y)
-                styles = [torch.cat([s, emb_y], dim=1) for s in styles]
+                # labels = self.pixel_norm(labels)
+                styles = [torch.cat([s, labels], dim=1) for s in styles]
             styles = [self.style(s) for s in styles]
 
         if noise is None:
@@ -615,10 +649,10 @@ class Generator(nn.Module):
             latent = torch.cat([latent, latent2], 1)
         
         if self.conditional_style:
-            latent = latent + self.embedding(labels).unsqueeze(1).repeat(1, self.n_latent, 1)
+            latent = latent + labels.unsqueeze(1).repeat(1, self.n_latent, 1)
 
         out = self.input(latent, labels)  # only batch_size of latent is used
-        out = self.conv1(out, latent[:, 0], noise=noise[0])
+        out = self.conv1(out, latent[:, 0], noise=noise[0], labels=labels)
 
         skip = self.to_rgb1(out, latent[:, 1])
 
@@ -626,8 +660,8 @@ class Generator(nn.Module):
         for conv1, conv2, noise1, noise2, to_rgb in zip(
             self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
         ):
-            out = conv1(out, latent[:, i], noise=noise1)
-            out = conv2(out, latent[:, i + 1], noise=noise2)
+            out = conv1(out, latent[:, i], noise=noise1, labels=labels)
+            out = conv2(out, latent[:, i + 1], noise=noise2, labels=labels)
             skip = to_rgb(out, latent[:, i + 2], skip)
 
             i += 2
@@ -750,7 +784,8 @@ class Discriminator(nn.Module):
             self.embed_dim = channels[4]
         if embed_is_linear:
             self.embedding = EqualLinear(
-                self.embed_dim, n_classes, activation="fused_lrelu"
+                self.embed_dim, n_classes,
+                # activation="fused_lrelu"
             )
         else:
             self.embedding = nn.Embedding(n_classes, self.embed_dim)

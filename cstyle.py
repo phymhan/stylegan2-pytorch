@@ -466,7 +466,8 @@ class Generator(nn.Module):
             self.shared = nn.Sequential(
                 OneHot(n_classes),
                 EqualLinear(
-                    n_classes, style_dim, lr_mul=lr_emb, # activation="fused_lrelu"
+                    n_classes, style_dim, lr_mul=lr_emb,
+                    bias=False, activation=None,
                 ),
             )
             
@@ -785,7 +786,7 @@ class Discriminator(nn.Module):
         if embed_is_linear:
             self.embedding = EqualLinear(
                 self.embed_dim, n_classes,
-                # activation="fused_lrelu"
+                bias=False, activation=None,
             )
         else:
             self.embedding = nn.Embedding(n_classes, self.embed_dim)

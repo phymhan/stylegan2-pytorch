@@ -438,7 +438,7 @@ class StyledConv(nn.Module):
             self.activate = FusedLeakyReLU(out_channel)
 
     def forward(self, input, style, noise=None, labels=None):
-        out = self.conv(input, style)
+        out = self.conv(input, style, labels)
         out = self.noise(out, noise=noise)
         # out = out + self.bias
         if self.conditional_fused:
@@ -575,7 +575,7 @@ class Generator(nn.Module):
             self.input = ConstantInput(self.channels[4])
         self.conv1 = StyledConv(
             self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel,
-            bias_linear=bias_linear,
+            fused_bias_linear=bias_linear, conditional_bias=conditional_bias,
         )
         self.to_rgb1 = ToRGB(self.channels[4], style_dim, upsample=False)
 
@@ -605,14 +605,16 @@ class Generator(nn.Module):
                     style_dim,
                     upsample=True,
                     blur_kernel=blur_kernel,
-                    bias_linear=bias_linear,
+                    fused_bias_linear=bias_linear,
+                    conditional_bias=conditional_bias,
                 )
             )
 
             self.convs.append(
                 StyledConv(
                     out_channel, out_channel, 3, style_dim, blur_kernel=blur_kernel,
-                    bias_linear=bias_linear
+                    fused_bias_linear=bias_linear,
+                    conditional_bias=conditional_bias
                 )
             )
 

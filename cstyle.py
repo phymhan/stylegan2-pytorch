@@ -171,6 +171,45 @@ class EqualLinear(nn.Module):
         )
 
 
+class ConditionalEqualLinear(nn.Module):
+    def __init__(
+        self, in_dim, out_dim, bias=True, bias_init=0, lr_mul=1, activation=None,
+        embed_dim=512,
+    ):
+        super().__init__()
+
+        self.weight = nn.Parameter(torch.randn(out_dim, in_dim).div_(lr_mul))
+
+        if bias:
+            self.bias = nn.Parameter(torch.randn(out_dim, embed_dim).div_(lr_mul))
+
+        else:
+            self.bias = None
+
+        self.activation = activation
+
+        self.scale_w = (1 / math.sqrt(in_dim)) * lr_mul
+        self.scale_b = (1 / math.sqrt(embed_dim)) * lr_mul
+        self.lr_mul = lr_mul
+
+    def forward(self, input, labels):
+        out = F.linear(input, self.weight * self.scale_w, bias=None)
+
+        if self.bias is not None:
+            bias = F.linear(labels, self.bias * self.scale_b, bias=None)
+            out = out + bias * self.lr_mul
+
+        if self.activation:
+            out = fused_leaky_relu(out, bias=None)
+
+        return out
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}({self.weight.shape[1]}, {self.weight.shape[0]})"
+        )
+
+
 class ModulatedConv2d(nn.Module):
     def __init__(
         self,
@@ -183,6 +222,7 @@ class ModulatedConv2d(nn.Module):
         downsample=False,
         blur_kernel=[1, 3, 3, 1],
         fused=True,
+        conditional_bias=False,
     ):
         super().__init__()
 
@@ -192,6 +232,7 @@ class ModulatedConv2d(nn.Module):
         self.out_channel = out_channel
         self.upsample = upsample
         self.downsample = downsample
+        self.conditional_bias = conditional_bias
 
         if upsample:
             factor = 2
@@ -217,7 +258,10 @@ class ModulatedConv2d(nn.Module):
             torch.randn(1, out_channel, in_channel, kernel_size, kernel_size)
         )
 
-        self.modulation = EqualLinear(style_dim, in_channel, bias_init=1)
+        if self.conditional_bias:
+            self.modulation = ConditionalEqualLinear(style_dim, in_channel, True, embed_dim=style_dim)
+        else:
+            self.modulation = EqualLinear(style_dim, in_channel, bias_init=1)
 
         self.demodulate = demodulate
         self.fused = fused
@@ -228,12 +272,15 @@ class ModulatedConv2d(nn.Module):
             f"upsample={self.upsample}, downsample={self.downsample})"
         )
 
-    def forward(self, input, style):
+    def forward(self, input, style, labels=None):
         batch, in_channel, height, width = input.shape
 
         if not self.fused:
             weight = self.scale * self.weight.squeeze(0)
-            style = self.modulation(style)
+            if self.conditional_bias:
+                style = self.modulation(style, labels)
+            else:
+                style = self.modulation(style)
 
             if self.demodulate:
                 w = weight.unsqueeze(0) * style.view(batch, 1, in_channel, 1, 1)
@@ -260,7 +307,10 @@ class ModulatedConv2d(nn.Module):
 
             return out
 
-        style = self.modulation(style).view(batch, 1, in_channel, 1, 1)
+        if self.conditional_bias:
+            style = self.modulation(style, labels).view(batch, 1, in_channel, 1, 1)
+        else:
+            style = self.modulation(style).view(batch, 1, in_channel, 1, 1)
         weight = self.scale * self.weight * style
 
         if self.demodulate:
@@ -361,7 +411,8 @@ class StyledConv(nn.Module):
         upsample=False,
         blur_kernel=[1, 3, 3, 1],
         demodulate=True,
-        bias_linear=None,  # linear(embed) -> out_channel
+        fused_bias_linear=None,  # fused_bias(embed) -> out_channel
+        conditional_bias=False,  # conditional bias in modulation
     ):
         super().__init__()
 
@@ -373,21 +424,24 @@ class StyledConv(nn.Module):
             upsample=upsample,
             blur_kernel=blur_kernel,
             demodulate=demodulate,
+            conditional_bias=conditional_bias,
         )
 
         self.noise = NoiseInjection()
         # self.bias = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
         # self.activate = ScaledLeakyReLU(0.2)
-        self.conditional_bias = bias_linear is not None
-        if self.conditional_bias:
-            self.bias = bias_linear(out_dim=out_channel)
-        self.activate = FusedLeakyReLU(out_channel)
+        self.conditional_fused = fused_bias_linear is not None
+        if self.conditional_fused:
+            self.bias = fused_bias_linear(out_dim=out_channel)
+            self.activate = FusedLeakyReLU(out_channel, bias=False)
+        else:
+            self.activate = FusedLeakyReLU(out_channel)
 
     def forward(self, input, style, noise=None, labels=None):
         out = self.conv(input, style)
         out = self.noise(out, noise=noise)
         # out = out + self.bias
-        if self.conditional_bias:
+        if self.conditional_fused:
             bias = self.bias(labels)
             rest_dim = [1] * (out.ndim - bias.ndim)
             out = out + bias.view(bias.shape[0], bias.shape[1], *rest_dim)
@@ -441,10 +495,12 @@ class Generator(nn.Module):
         n_classes=10,
         conditional_strategy='ProjGAN',
         embed_is_linear=False,
-        conditional_noise=True,   # [z, y] --> w
-        conditional_style=False,  # w + y --> w
-        conditional_input=False,  # input(y)
-        conditional_fused=False,  # bias(y) in fused leaky relu
+        conditional_style_in=True,    # [z, y] --> w
+        conditional_style_out=False,  # w + y --> w
+        conditional_input=False,      # input(y)
+        conditional_fused=False,      # bias(y) in fused leaky relu
+        conditional_bias=False,       # style bias is conditional
+        conditional_noise=False,      # make B conditional (channelwise)
     ):
         super().__init__()
 
@@ -453,8 +509,8 @@ class Generator(nn.Module):
         self.n_classes = n_classes
         self.conditional_strategy = conditional_strategy
         self.embed_is_linear = embed_is_linear
-        self.conditional_noise = conditional_noise
-        self.conditional_style = conditional_style
+        self.conditional_style_in = conditional_style_in
+        self.conditional_style_out = conditional_style_out
         self.conditional_input = conditional_input
         self.conditional_fused = conditional_fused
 
@@ -486,7 +542,7 @@ class Generator(nn.Module):
         
         self.pixel_norm = PixelNorm()
 
-        if self.conditional_noise:
+        if self.conditional_style_in:
             layers = [EqualLinear(style_dim + self.embed_dim, style_dim, lr_mul=lr_mlp, activation="fused_lrelu")]
             n_mlp -= 1
         else:
@@ -603,7 +659,7 @@ class Generator(nn.Module):
 
         if not input_is_latent:
             # styles is noise
-            if self.conditional_noise:
+            if self.conditional_style_in:
                 styles = [self.pixel_norm(s) for s in styles]
                 # labels = self.pixel_norm(labels)
                 styles = [torch.cat([s, labels], dim=1) for s in styles]
@@ -648,7 +704,7 @@ class Generator(nn.Module):
 
             latent = torch.cat([latent, latent2], 1)
         
-        if self.conditional_style:
+        if self.conditional_style_out:
             latent = latent + labels.unsqueeze(1).repeat(1, self.n_latent, 1)
 
         out = self.input(latent, labels)  # only batch_size of latent is used
@@ -778,9 +834,7 @@ class Discriminator(nn.Module):
         self.which_phi = which_phi
         if self.which_phi == 'vec':
             self.embed_dim = channels[4] * 4 * 4
-        elif self.which_phi == 'avg':
-            self.embed_dim = channels[4]
-        elif self.which_phi == 'lin':
+        elif self.which_phi in ['avg', 'lin1', 'lin2']:
             self.embed_dim = channels[4]
         if embed_is_linear:
             self.embedding = EqualLinear(
@@ -819,9 +873,18 @@ class Discriminator(nn.Module):
             self.final_linear = nn.Sequential(
                 EqualLinear(channels[4], channels[4], activation="fused_lrelu"),
                 EqualLinear(channels[4], 1))
-        elif self.which_phi == 'lin':
+        elif self.which_phi == 'lin1':
             self.final_linear0 = EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu")
             self.final_linear = EqualLinear(channels[4], 1)
+        elif self.which_phi == 'lin2':
+            self.final_linear0 = nn.Sequential(
+                EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
+                EqualLinear(channels[4], channels[4]),
+            )
+            self.final_linear = EqualLinear(channels[4], 1)
+
+        if self.conditional_strategy == 'InnerProd':
+            self.final_linear = None
 
     def forward(self, input, labels=None):
         out = self.convs(input)
@@ -841,10 +904,14 @@ class Discriminator(nn.Module):
             h = out.view(batch, -1)
         elif self.which_phi == 'avg':  # h = phi(x), dim is 512
             h = torch.sum(out, [2, 3]) / 16.
-        elif self.which_phi == 'lin':  # h = phi(x), dim is 512
+        elif self.which_phi in ['lin1', 'lin2']:  # h = phi(x), dim is 512
             h = self.final_linear0(out.view(batch, -1))
 
-        out = torch.squeeze(self.final_linear(h))
+        if self.conditional_strategy == 'ProjGAN':
+            out = torch.squeeze(self.final_linear(h))
+        elif self.conditional_strategy == 'InnerProd':
+            out = 0.
+
         if self.embed_is_linear:
             proj = self.embedding(h)[range(batch), labels]
         else:

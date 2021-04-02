@@ -526,12 +526,16 @@ if __name__ == "__main__":
     parser.add_argument("--n_sample_fid", type=int, default=50000, help="number of the samples for calculating FID")
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--n_step_d", type=int, default=1)
+    parser.add_argument("--n_accum_d", type=int, default=1)
+    parser.add_argument("--n_accum_g", type=int, default=1)
     parser.add_argument("--embed_is_linear", action='store_true')
     parser.add_argument("--which_phi", type=str, default='vec')
-    parser.add_argument("--conditional_noise", type=util.str2bool, default=True)
-    parser.add_argument("--conditional_style", type=util.str2bool, default=False)
+    parser.add_argument("--conditional_style_in", type=util.str2bool, default=True)
+    parser.add_argument("--conditional_style_out", type=util.str2bool, default=False)
     parser.add_argument("--conditional_input", type=util.str2bool, default=False)
     parser.add_argument("--conditional_fused", type=util.str2bool, default=False)
+    parser.add_argument("--conditional_bias", type=util.str2bool, default=False)
+    parser.add_argument("--conditional_noise", type=util.str2bool, default=False)
 
     args = parser.parse_args()
     util.seed_everything()
@@ -564,10 +568,12 @@ if __name__ == "__main__":
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         embed_is_linear=args.embed_is_linear,
-        conditional_noise=args.conditional_noise,
-        conditional_style=args.conditional_style,
+        conditional_style_in=args.conditional_style_in,
+        conditional_style_out=args.conditional_style_out,
         conditional_input=args.conditional_input,
         conditional_fused=args.conditional_fused,
+        conditional_bias=args.conditional_bias,
+        conditional_noise=args.conditional_noise,
     ).to(device)
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier,
@@ -581,10 +587,12 @@ if __name__ == "__main__":
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         embed_is_linear=args.embed_is_linear,
-        conditional_noise=args.conditional_noise,
-        conditional_style=args.conditional_style,
+        conditional_style_in=args.conditional_style_in,
+        conditional_style_out=args.conditional_style_out,
         conditional_input=args.conditional_input,
         conditional_fused=args.conditional_fused,
+        conditional_bias=args.conditional_bias,
+        conditional_noise=args.conditional_noise,
     ).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)

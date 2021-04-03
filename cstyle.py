@@ -495,6 +495,7 @@ class Generator(nn.Module):
         n_classes=10,
         conditional_strategy='ProjGAN',
         embed_is_linear=False,
+        add_pixel_norm=False,
         conditional_style_in=True,    # [z, y] --> w
         conditional_style_out=False,  # w + y --> w
         conditional_input=False,      # input(y)
@@ -508,6 +509,7 @@ class Generator(nn.Module):
         self.style_dim = style_dim
         self.n_classes = n_classes
         self.conditional_strategy = conditional_strategy
+        self.add_pixel_norm = add_pixel_norm
         self.embed_is_linear = embed_is_linear
         self.conditional_style_in = conditional_style_in
         self.conditional_style_out = conditional_style_out
@@ -659,12 +661,13 @@ class Generator(nn.Module):
     ):
         if not label_is_embeding:
             labels = self.shared(labels)
+        if self.add_pixel_norm:
+            labels = self.pixel_norm(labels)
 
         if not input_is_latent:
             # styles is noise
             if self.conditional_style_in:
                 styles = [self.pixel_norm(s) for s in styles]
-                # labels = self.pixel_norm(labels)
                 styles = [torch.cat([s, labels], dim=1) for s in styles]
             styles = [self.style(s) for s in styles]
 
@@ -798,22 +801,26 @@ class ConvLayer(nn.Sequential):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channel, out_channel, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, in_channel, out_channel, blur_kernel=[1, 3, 3, 1], architecture='resnet'):
         super().__init__()
+
+        self.architecture = architecture
 
         self.conv1 = ConvLayer(in_channel, in_channel, 3)
         self.conv2 = ConvLayer(in_channel, out_channel, 3, downsample=True)
 
-        self.skip = ConvLayer(
-            in_channel, out_channel, 1, downsample=True, activate=False, bias=False
-        )
+        if architecture == 'resnet':
+            self.skip = ConvLayer(
+                in_channel, out_channel, 1, downsample=True, activate=False, bias=False
+            )
 
     def forward(self, input):
         out = self.conv1(input)
         out = self.conv2(out)
 
-        skip = self.skip(input)
-        out = (out + skip) / math.sqrt(2)
+        if self.architecture == 'resnet':
+            skip = self.skip(input)
+            out = (out + skip) / math.sqrt(2)
 
         return out
 
@@ -826,7 +833,9 @@ class Discriminator(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         in_channel=3,
         n_classes=10,
+        architecture='resnet',
         conditional_strategy='InnerProd',
+        add_pixel_norm=False,
         embed_is_linear=False,
         which_phi='lin2',
         which_cmap='embed',
@@ -856,7 +865,9 @@ class Discriminator(nn.Module):
         lr_emb = 1.
         bias_emb = True
         self.n_classes = n_classes
+        self.architecture = architecture
         self.conditional_strategy = conditional_strategy
+        self.add_pixel_norm = add_pixel_norm
         self.embed_is_linear = embed_is_linear
         self.which_cmap = which_cmap
         self.which_phi = which_phi
@@ -879,8 +890,7 @@ class Discriminator(nn.Module):
         if self.which_cmap == 'embed':
             self.cmap = Identity()
         elif self.which_cmap == 'mlp':
-            layers = [PixelNorm()]
-            # layers = []
+            layers = [PixelNorm()] if self.add_pixel_norm else []
             for i in range(n_mlp):
                 layers.append(
                     EqualLinear(
@@ -900,7 +910,11 @@ class Discriminator(nn.Module):
         for i in range(log_size, 2, -1):
             out_channel = channels[2 ** (i - 1)]
 
-            convs.append(ResBlock(in_channel, out_channel, blur_kernel))
+            convs.append(
+                ResBlock(in_channel, out_channel, blur_kernel,
+                    architecture=architecture,
+                )
+            )
 
             in_channel = out_channel
 

@@ -537,6 +537,8 @@ if __name__ == "__main__":
     parser.add_argument("--conditional_fused", type=util.str2bool, default=False)
     parser.add_argument("--conditional_bias", type=util.str2bool, default=False)
     parser.add_argument("--conditional_noise", type=util.str2bool, default=False)
+    parser.add_argument("--arch_D", type=str, default='resnet', help="D architectures (resnet | orig)")
+    parser.add_argument("--add_pixel_norm", type=util.str2bool, default=False, help="use PixelNorm after mapping?")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -568,6 +570,7 @@ if __name__ == "__main__":
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
+        add_pixel_norm=args.add_pixel_norm,
         embed_is_linear=args.embed_is_linear,
         conditional_style_in=args.conditional_style_in,
         conditional_style_out=args.conditional_style_out,
@@ -580,14 +583,17 @@ if __name__ == "__main__":
         args.size, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
+        add_pixel_norm=args.add_pixel_norm,
         embed_is_linear=args.embed_is_linear,
         which_phi=args.which_phi,
         which_cmap=args.which_cmap,
+        architecture=args.arch_D,
     ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
+        add_pixel_norm=args.add_pixel_norm,
         embed_is_linear=args.embed_is_linear,
         conditional_style_in=args.conditional_style_in,
         conditional_style_out=args.conditional_style_out,

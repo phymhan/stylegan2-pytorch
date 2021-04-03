@@ -1017,6 +1017,7 @@ if __name__ == "__main__":
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
+    util.print_models([generator, discriminator, encoder], args)
 
     train(
         args, loader, loader2, generator, encoder, discriminator, discriminator2,

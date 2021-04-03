@@ -888,7 +888,7 @@ class Discriminator(nn.Module):
             self.shared = nn.Embedding(n_classes, self.embed_dim)
         
         if self.which_cmap == 'embed':
-            self.cmap = Identity()
+            self.cmap = PixelNorm() if self.add_pixel_norm else Identity()
         elif self.which_cmap == 'mlp':
             layers = [PixelNorm()] if self.add_pixel_norm else []
             for i in range(n_mlp):

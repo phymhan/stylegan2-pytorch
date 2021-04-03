@@ -87,6 +87,20 @@ def print_args(parser, args):
     shutil.copyfile(sys.argv[0], os.path.join(args.log_dir, f'{os.path.basename(sys.argv[0])}.txt'))
 
 
+def print_models(models, args):
+    if isinstance(models, (list, tuple)):
+        models = [models]
+    exp_dir = args.log_dir
+    if not os.path.exists(exp_dir):
+        os.makedirs(exp_dir)
+    file_name = os.path.join(exp_dir, 'models.txt')
+    with open(file_name, 'a+') as f:
+        f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
+        for model in models:
+            f.write(str(model))
+            f.write("\n\n")
+
+
 def str2list(attr_bins):
     assert (isinstance(attr_bins, str))
     attr_bins = attr_bins.strip()

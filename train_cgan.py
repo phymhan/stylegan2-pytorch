@@ -516,7 +516,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--flip", action="store_true", help="apply random flipping to real images"
     )
-    parser.add_argument("--conditional_strategy", type=str, default='ProjGAN')
+    parser.add_argument("--conditional_strategy", type=str, default='InnerProd')
     parser.add_argument("--n_classes", type=int, default=10)
     parser.add_argument("--n_sample_per_class", type=int, default=8, help="number of the samples per class")
     parser.add_argument("--n_class_per_sheet", type=int, default=8)
@@ -529,7 +529,8 @@ if __name__ == "__main__":
     parser.add_argument("--n_accum_d", type=int, default=1)
     parser.add_argument("--n_accum_g", type=int, default=1)
     parser.add_argument("--embed_is_linear", action='store_true')
-    parser.add_argument("--which_phi", type=str, default='vec')
+    parser.add_argument("--which_phi", type=str, default='lin2')
+    parser.add_argument("--which_cmap", type=str, default='mlp')
     parser.add_argument("--conditional_style_in", type=util.str2bool, default=True)
     parser.add_argument("--conditional_style_out", type=util.str2bool, default=False)
     parser.add_argument("--conditional_input", type=util.str2bool, default=False)
@@ -581,6 +582,7 @@ if __name__ == "__main__":
         conditional_strategy=args.conditional_strategy,
         embed_is_linear=args.embed_is_linear,
         which_phi=args.which_phi,
+        which_cmap=args.which_cmap,
     ).to(device)
     g_ema = Generator(
         args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,

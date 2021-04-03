@@ -516,13 +516,14 @@ class Generator(nn.Module):
 
         # Conditional embedding
         lr_emb = 1.
+        bias_emb = True
         self.embed_dim = style_dim
         if embed_is_linear:
             self.shared = nn.Sequential(
                 OneHot(n_classes),
                 EqualLinear(
                     n_classes, style_dim, lr_mul=lr_emb,
-                    bias=False, activation=None,
+                    bias=bias_emb, activation=None,
                 ),
             )
             
@@ -733,6 +734,24 @@ class Generator(nn.Module):
             return image, None
 
 
+class Identity(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super(Identity, self).__init__()
+        # self.dummy = nn.Linear(1, 1, False)
+
+    def forward(self, input):
+        return input
+
+
+class Reshape(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super(Reshape, self).__init__()
+        # self.dummy = nn.Linear(1, 1, False)
+
+    def forward(self, input):
+        return input.view(input.shape[0], -1)
+
+
 class ConvLayer(nn.Sequential):
     def __init__(
         self,
@@ -807,9 +826,13 @@ class Discriminator(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         in_channel=3,
         n_classes=10,
-        conditional_strategy='ProjGAN',
+        conditional_strategy='InnerProd',
         embed_is_linear=False,
-        which_phi='vec',
+        which_phi='lin2',
+        which_cmap='embed',
+        embed_dim=None,
+        n_mlp=8,
+        lr_mlp=0.01,
     ):
         """
         which_phi == 'vec': phi(x) is vectorized feature before final_linear
@@ -830,21 +853,42 @@ class Discriminator(nn.Module):
             1024: 16 * channel_multiplier,
         }
 
+        lr_emb = 1.
+        bias_emb = True
         self.n_classes = n_classes
         self.conditional_strategy = conditional_strategy
         self.embed_is_linear = embed_is_linear
+        self.which_cmap = which_cmap
         self.which_phi = which_phi
         if self.which_phi == 'vec':
             self.embed_dim = channels[4] * 4 * 4
-        elif self.which_phi in ['avg', 'lin1', 'lin2']:
+        elif self.which_phi in ['avg1', 'avg2', 'lin1', 'lin2']:
             self.embed_dim = channels[4]
+        
         if embed_is_linear:
-            self.embedding = EqualLinear(
-                self.embed_dim, n_classes,
-                bias=False, activation=None,
+            self.shared = nn.Sequential(
+                OneHot(n_classes),
+                EqualLinear(
+                    n_classes, self.embed_dim, lr_mul=lr_emb,
+                    bias=bias_emb, activation=None,
+                ),
             )
         else:
-            self.embedding = nn.Embedding(n_classes, self.embed_dim)
+            self.shared = nn.Embedding(n_classes, self.embed_dim)
+        
+        if self.which_cmap == 'embed':
+            self.cmap = Identity()
+        elif self.which_cmap == 'mlp':
+            layers = [PixelNorm()]
+            # layers = []
+            for i in range(n_mlp):
+                layers.append(
+                    EqualLinear(
+                        self.embed_dim, self.embed_dim, lr_mul=lr_mlp, activation="fused_lrelu"
+                    )
+                )
+            self.cmap = nn.Sequential(*layers)
+
         self.pixel_norm = PixelNorm()
 
         convs = [ConvLayer(in_channel, channels[size], 1)]
@@ -866,27 +910,35 @@ class Discriminator(nn.Module):
         self.stddev_feat = 1
 
         self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)
+
+        # After final_conv -> block_phi + block_psi
         if self.which_phi == 'vec':
-            self.final_linear = nn.Sequential(
+            self.block_phi = Reshape()
+            self.block_psi = nn.Sequential(
                 EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-                EqualLinear(channels[4], 1),
-            )  # final_linear is not linear
-        elif self.which_phi == 'avg':
-            self.final_linear = nn.Sequential(
+                EqualLinear(channels[4], 1))
+        elif self.which_phi == 'avg1':
+            self.block_phi = nn.AvgPool2d(4)  # squeeze is needed in forward
+            self.block_psi = EqualLinear(channels[4], 1)
+        elif self.which_phi == 'avg2':
+            self.block_phi = nn.AvgPool2d(4)  # squeeze is needed in forward
+            self.block_psi = nn.Sequential(
                 EqualLinear(channels[4], channels[4], activation="fused_lrelu"),
                 EqualLinear(channels[4], 1))
         elif self.which_phi == 'lin1':
-            self.final_linear0 = EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu")
-            self.final_linear = EqualLinear(channels[4], 1)
+            self.block_phi = nn.Sequential(
+                Reshape(),
+                EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"))
+            self.block_psi = EqualLinear(channels[4], 1)
         elif self.which_phi == 'lin2':
-            self.final_linear0 = nn.Sequential(
+            self.block_phi = nn.Sequential(
+                Reshape(),
                 EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-                EqualLinear(channels[4], channels[4]),
-            )
-            self.final_linear = EqualLinear(channels[4], 1)
+                EqualLinear(channels[4], channels[4]))
+            self.block_psi = EqualLinear(channels[4], 1)
 
         if self.conditional_strategy == 'InnerProd':
-            self.final_linear = None
+            self.block_psi = None
 
     def forward(self, input, labels=None):
         out = self.convs(input)
@@ -901,186 +953,14 @@ class Discriminator(nn.Module):
         stddev = stddev.repeat(group, 1, height, width)
         out = torch.cat([out, stddev], 1)
         out = self.final_conv(out)
+        
+        h = torch.squeeze(self.block_phi(out))  # h is phi(x)
 
-        if self.which_phi == 'vec':  # h = phi(x), dim is 8192
-            h = out.view(batch, -1)
-        elif self.which_phi == 'avg':  # h = phi(x), dim is 512
-            h = torch.sum(out, [2, 3]) / 16.
-        elif self.which_phi in ['lin1', 'lin2']:  # h = phi(x), dim is 512
-            h = self.final_linear0(out.view(batch, -1))
+        proj = torch.sum(torch.mul(self.cmap(self.shared(labels)), h), 1)
 
         if self.conditional_strategy == 'ProjGAN':
-            out = torch.squeeze(self.final_linear(h))
+            out = torch.squeeze(self.block_psi(h))
         elif self.conditional_strategy == 'InnerProd':
             out = 0.
 
-        if self.embed_is_linear:
-            proj = self.embedding(h)[range(batch), labels]
-        else:
-            proj = torch.sum(torch.mul(self.embedding(labels), h), 1)
-        
         return proj + out
-
-
-class LinearResBlock(nn.Module):
-    def __init__(self, latent_dim=512, n_mlp=2, use_residual=True):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.use_residual = use_residual
-        layers = []
-        for i in range(n_mlp):
-            layers.append(
-                EqualLinear(
-                    latent_dim, latent_dim, lr_mul=0.01, activation="fused_lrelu"
-                )
-            )
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, input):
-        out = self.layers(input)
-        if self.use_residual:
-            return (input + out) / math.sqrt(2)
-        else:
-            return out
-
-
-class LatentMLP(nn.Module):
-    def __init__(self, latent_dim=512, n_mlp=8, use_residual=False, use_pixelnorm=False):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.use_residual = use_residual
-        n_layer_per_block = 2
-        if use_pixelnorm:
-            layers = [PixelNorm()]
-        else:
-            layers = []
-
-        for i in range(n_mlp//n_layer_per_block):
-            layers.append(
-                LinearResBlock(
-                    latent_dim, n_layer_per_block, use_residual
-                )
-            )
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, input):
-        shape = input.shape
-        if shape[-1] > self.latent_dim:
-            out = self.layers(input.view(-1, self.latent_dim))
-            out = out.view(*shape)
-        else:
-            out = self.layers(input)
-        return out
-
-
-class Identity(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-        self.dummy = nn.Linear(1, 1, False)
-
-    def forward(self, input):
-        return input
-
-
-class Encoder(nn.Module):
-    def __init__(
-        self,
-        size,
-        style_dim=512,
-        channel_multiplier=2,
-        blur_kernel=[1, 3, 3, 1],
-        which_latent='w_plus',
-        reshape_latent=False,
-        stddev_group=4,
-        stddev_feat=1,
-        reparameterization=False,
-        return_tuple=True,  # backward compatibility
-    ):
-        """
-        which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
-          a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
-          'wb_shared' predict shared w and different biases.
-        """
-        super().__init__()
-
-        channels = {
-            4: 512,
-            8: 512,
-            16: 512,
-            32: 512,
-            64: 256 * channel_multiplier,
-            128: 128 * channel_multiplier,
-            256: 64 * channel_multiplier,
-            512: 32 * channel_multiplier,
-            1024: 16 * channel_multiplier,
-        }
-
-        convs = [ConvLayer(3, channels[size], 1)]
-
-        log_size = int(math.log(size, 2))
-        self.n_latent = log_size * 2 - 2  # copied from Generator
-        self.n_noises = (log_size - 2) * 2 + 1
-        self.which_latent = which_latent
-        self.reshape_latent = reshape_latent
-        self.style_dim = style_dim
-        self.reparameterization = reparameterization
-        self.return_tuple = return_tuple
-
-        in_channel = channels[size]
-
-        for i in range(log_size, 2, -1):
-            out_channel = channels[2 ** (i - 1)]
-
-            convs.append(ResBlock(in_channel, out_channel, blur_kernel))
-
-            in_channel = out_channel
-
-        self.convs = nn.Sequential(*convs)
-
-        self.stddev_group = stddev_group
-        self.stddev_feat = stddev_feat
-
-        self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
-        if self.which_latent == 'w_plus':
-            out_channel = style_dim * self.n_latent
-        elif self.which_latent == 'w_shared':
-            out_channel = style_dim
-        else:
-            raise NotImplementedError
-        self.final_linear = nn.Sequential(
-            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-            EqualLinear(channels[4], out_channel),
-        )
-        if reparameterization:
-            self.final_logvar = nn.Sequential(
-            EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-            EqualLinear(channels[4], out_channel),
-        )
-
-    def forward(self, input, reshape=False):
-        out = self.convs(input)
-        batch = out.shape[0]
-
-        if self.stddev_group > 1:
-            batch, channel, height, width = out.shape
-            group = min(batch, self.stddev_group)
-            stddev = out.view(
-                group, -1, self.stddev_feat, channel // self.stddev_feat, height, width
-            )
-            stddev = torch.sqrt(stddev.var(0, unbiased=False) + 1e-8)
-            stddev = stddev.mean([2, 3, 4], keepdims=True).squeeze(2)
-            stddev = stddev.repeat(group, 1, height, width)
-            out = torch.cat([out, stddev], 1)
-
-        out = self.final_conv(out)
-
-        out = out.view(batch, -1)
-        out_mean = self.final_linear(out)
-        if self.reparameterization:
-            out_logvar = self.final_logvar(out)
-            return out_mean, out_logvar
-        if self.which_latent == 'w_plus' and reshape:
-            out_mean = out_mean.reshape(batch, self.n_latent, self.style_dim)
-        if self.return_tuple:
-            return out_mean, None
-        return out_mean

@@ -217,7 +217,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         else:
             d2_module = discriminator2
 
-    accum = 0.5 ** (32 / (10 * 1000))
+    # accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
     r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
@@ -476,6 +476,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
+        # Update EMA
+        ema_nimg = args.ema_kimg * 1000
+        if args.ema_rampup is not None:
+            ema_nimg = min(ema_nimg, i * args.batch * args.ema_rampup)
+        accum = 0.5 ** (args.batch / max(ema_nimg, 1e-8))
         accumulate(e_ema, e_module, accum)
         accumulate(g_ema, g_module, accum)
 
@@ -802,6 +807,9 @@ if __name__ == "__main__":
     parser.add_argument("--limit_train_batches", type=float, default=1)
     parser.add_argument("--no_eval_hybrid", action='store_true')
     parser.add_argument("--g_decay", type=float, default=1, help="g decay factor")
+    parser.add_argument("--n_mlp_g", type=int, default=8)
+    parser.add_argument("--ema_kimg", type=int, default=10, help="Half-life of the exponential moving average (EMA) of generator weights.")
+    parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -815,7 +823,7 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
         synchronize()
 
-    args.n_mlp = 8
+    # args.n_mlp = 8
     args.n_latent = int(np.log2(args.size)) * 2 - 2
     args.latent = 512
     if args.which_latent == 'w_plus':
@@ -836,13 +844,13 @@ if __name__ == "__main__":
         from swagan import Generator, Discriminator
 
     generator = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
+        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier
     ).to(device)
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier,
     ).to(device)
     g_ema = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
+        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier
     ).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)

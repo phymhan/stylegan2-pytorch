@@ -88,7 +88,7 @@ def print_args(parser, args):
 
 
 def print_models(models, args):
-    if isinstance(models, (list, tuple)):
+    if not isinstance(models, (list, tuple)):
         models = [models]
     exp_dir = args.log_dir
     if not os.path.exists(exp_dir):

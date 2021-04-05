@@ -539,6 +539,9 @@ if __name__ == "__main__":
     parser.add_argument("--conditional_noise", type=util.str2bool, default=False)
     parser.add_argument("--arch_D", type=str, default='resnet', help="D architectures (resnet | orig)")
     parser.add_argument("--add_pixel_norm", type=util.str2bool, default=False, help="use PixelNorm after mapping?")
+    parser.add_argument("--stddev_group", type=int, default=4)
+    parser.add_argument("--n_mlp_g", type=int, default=8)
+    parser.add_argument("--n_mlp_d", type=int, default=8)
 
     args = parser.parse_args()
     util.seed_everything()
@@ -553,7 +556,6 @@ if __name__ == "__main__":
         synchronize()
 
     args.latent = 512
-    args.n_mlp = 8
     args.mixing = 0  # disable mixing
     args.flip = True
 
@@ -567,7 +569,7 @@ if __name__ == "__main__":
         raise NotImplementedError
 
     generator = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,
+        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         add_pixel_norm=args.add_pixel_norm,
@@ -581,6 +583,7 @@ if __name__ == "__main__":
     ).to(device)
     discriminator = Discriminator(
         args.size, channel_multiplier=args.channel_multiplier,
+        stddev_group=args.stddev_group,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         add_pixel_norm=args.add_pixel_norm,
@@ -588,9 +591,10 @@ if __name__ == "__main__":
         which_phi=args.which_phi,
         which_cmap=args.which_cmap,
         architecture=args.arch_D,
+        n_mlp=args.n_mlp_d,
     ).to(device)
     g_ema = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier,
+        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier,
         n_classes=args.n_classes,
         conditional_strategy=args.conditional_strategy,
         add_pixel_norm=args.add_pixel_norm,

@@ -832,6 +832,7 @@ class Discriminator(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         in_channel=3,
+        stddev_group=4,
         n_classes=10,
         architecture='resnet',
         conditional_strategy='InnerProd',
@@ -901,7 +902,7 @@ class Discriminator(nn.Module):
 
         self.pixel_norm = PixelNorm()
 
-        convs = [ConvLayer(in_channel, channels[size], 1)]
+        convs = [ConvLayer(in_channel, channels[size], 1)]  # fromrgb: 1x1 conv
 
         log_size = int(math.log(size, 2))
 
@@ -920,7 +921,7 @@ class Discriminator(nn.Module):
 
         self.convs = nn.Sequential(*convs)
 
-        self.stddev_group = 4
+        self.stddev_group = stddev_group
         self.stddev_feat = 1
 
         self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)

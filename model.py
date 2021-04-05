@@ -688,7 +688,15 @@ class ResBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], in_channel=3, which_phi='vec'):
+    def __init__(
+        self,
+        size,
+        channel_multiplier=2,
+        blur_kernel=[1, 3, 3, 1],
+        in_channel=3,
+        stddev_group=4,
+        which_phi='vec'
+    ):
         """
         which_phi == 'vec': phi(x) is vectorized feature before final_linear
         which_phi == 'avg': phi(x) is AvgPooled feature before final_linear
@@ -731,7 +739,7 @@ class Discriminator(nn.Module):
 
         self.convs = nn.Sequential(*convs)
 
-        self.stddev_group = 4
+        self.stddev_group = stddev_group
         self.stddev_feat = 1
 
         self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)

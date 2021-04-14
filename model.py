@@ -22,6 +22,35 @@ class PixelNorm(nn.Module):
         return input * torch.rsqrt(torch.mean(input ** 2, dim=1, keepdim=True) + 1e-8)
 
 
+class Identity(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super(Identity, self).__init__()
+        # self.dummy = nn.Linear(1, 1, False)
+
+    def forward(self, input):
+        return input
+
+
+class Reshape(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super(Reshape, self).__init__()
+        # self.dummy = nn.Linear(1, 1, False)
+
+    def forward(self, input):
+        return input.view(input.shape[0], -1)
+
+
+class OneHot(nn.Module):
+    def __init__(self, n_classes=10):
+        super(OneHot, self).__init__()
+        self.n_classes = n_classes
+
+    def forward(self, labels):
+        device = labels.device
+        labels = F.one_hot(labels, num_classes=self.n_classes).float().to(device)
+        return labels
+
+
 def make_kernel(k):
     k = torch.tensor(k, dtype=torch.float32)
 
@@ -719,7 +748,7 @@ class Discriminator(nn.Module):
         self.which_phi = which_phi
         if self.which_phi == 'vec':
             self.embed_dim = channels[4] * 4 * 4
-        elif self.which_phi == 'avg':
+        elif self.which_phi in ['avg1', 'avg2']:
             self.embed_dim = channels[4]
         else:
             raise NotImplementedError
@@ -746,13 +775,13 @@ class Discriminator(nn.Module):
         if self.which_phi == 'vec':
             self.final_linear = nn.Sequential(
                 EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
-                EqualLinear(channels[4], 1),
-            )
-        elif self.which_phi == 'avg':
+                EqualLinear(channels[4], 1))
+        elif self.which_phi == 'avg1':
+            self.final_linear = EqualLinear(channels[4], 1)
+        elif self.which_phi == 'avg2':
             self.final_linear = nn.Sequential(
                 EqualLinear(channels[4], channels[4], activation="fused_lrelu"),
-                EqualLinear(channels[4], 1),
-            )
+                EqualLinear(channels[4], 1))
 
     def forward(self, input):
         out = self.convs(input)
@@ -771,21 +800,12 @@ class Discriminator(nn.Module):
 
         if self.which_phi == 'vec':  # h = phi(x), dim is 8192
             h = out.view(batch, -1)
-        elif self.which_phi == 'avg':  # h = phi(x), dim is 512
+        elif self.which_phi in ['avg1', 'avg2']:  # h = phi(x), dim is 512
             h = torch.sum(out, [2, 3]) / 16.
 
         out = self.final_linear(h)
 
         return out
-
-
-class Identity(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-        self.dummy = nn.Linear(1, 1, False)
-
-    def forward(self, input):
-        return input
 
 
 class Encoder(nn.Module):
@@ -801,6 +821,8 @@ class Encoder(nn.Module):
         stddev_feat=1,
         reparameterization=False,
         return_tuple=True,  # backward compatibility
+        p_space='none',
+        pca_state=None,
     ):
         """
         which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
@@ -831,6 +853,9 @@ class Encoder(nn.Module):
         self.style_dim = style_dim
         self.reparameterization = reparameterization
         self.return_tuple = return_tuple
+        self.p_space = p_space
+        self.pca_state = pca_state
+        assert((p_space in ['none', 'w', 'p', 'z']) or (pca_state is not None))
 
         in_channel = channels[size]
 
@@ -862,8 +887,23 @@ class Encoder(nn.Module):
             EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"),
             EqualLinear(channels[4], out_channel),
         )
+    
+    def forward_latent(self, style, p_space, pca_state=None):
+        if p_space in ['w', 'none', 'z']:  # style is in W
+            return style
+        elif p_space in ['p']:  # style is in P
+            style = F.leaky_relu(style, 0.2)
+            return style
+        elif p_space in ['pn']:  # style is in PN
+            if style.shape[1] > self.style_dim:
+                p = torch.cat([torch.matmul(w * pca_state['Lambda'], pca_state['CT']) + pca_state['mu']
+                        for w in torch.split(style, self.style_dim, 1)], 1)
+            else:
+                p = torch.matmul(style * pca_state['Lambda'], pca_state['CT']) + pca_state['mu']
+            style = F.leaky_relu(p, 0.2)
+            return style
 
-    def forward(self, input, reshape=False):
+    def forward(self, input):
         out = self.convs(input)
         batch = out.shape[0]
 
@@ -885,11 +925,10 @@ class Encoder(nn.Module):
         if self.reparameterization:
             out_logvar = self.final_logvar(out)
             return out_mean, out_logvar
-        if self.which_latent == 'w_plus' and reshape:
-            out_mean = out_mean.reshape(batch, self.n_latent, self.style_dim)
+        out = self.forward_latent(out_mean, self.p_space, self.pca_state)
         if self.return_tuple:
-            return out_mean, None
-        return out_mean
+            return out, out_mean
+        return out
 
 
 class LatentDiscriminator(nn.Module):

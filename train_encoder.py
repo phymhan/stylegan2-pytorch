@@ -14,7 +14,7 @@ from PIL import Image
 from tqdm import tqdm
 import util
 from calc_inception import load_patched_inception_v3
-from fid import extract_feature_from_samples, calc_fid, extract_feature_from_recon_hybrid
+from fid import extract_feature_from_samples, calc_fid, extract_feature_from_reconstruction
 import pickle
 import pdb
 st = pdb.set_trace
@@ -157,7 +157,27 @@ def load_real_samples(args, data_iter):
     return sample_x
 
 
-def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device):
+# def degaussianize(W, s, C, mu):
+#     if W.shape[1] > C.shape[0]:
+#         return torch.cat([torch.matmul(w * s, C) + m for w in torch.split(W, C.shape[0], 1)], 1)
+#     else:
+#         return torch.matmul(W * s, C) + m
+
+
+# def forward_latent(style, p_space, pca_state=None):
+#     if p_space in ['w', 'none']:  # style is in W
+#         return style
+#     elif p_space in ['p']:  # style is in P
+#         style = F.leaky_relu(style, 0.2)
+#         return style
+#     elif p_space in ['pn']:  # style is in PN
+#         # p = torch.matmul(style * pca_stete['Lambda'], pca_stete['CT']) + pca_stete['mu']
+#         p = degaussianize(style, pca_stete['Lambda'], pca_stete['CT'], pca_stete['mu'])
+#         style = F.leaky_relu(p, 0.2)
+#         return style
+
+
+def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, pca_state, device):
     inception = real_mean = real_cov = mean_latent = None
     if args.eval_every > 0:
         inception = nn.DataParallel(load_patched_inception_v3()).to(device)
@@ -202,20 +222,23 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
         d_module = discriminator
         g_module = generator
 
-    accum = 0.5 ** (32 / (10 * 1000))
+    # accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
 
     if args.augment and args.augment_p == 0:
-        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
+        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
 
     # sample_x = accumulate_batches(loader, args.n_sample).to(device)
     sample_x = load_real_samples(args, loader)
     if sample_x.ndim > 4:
         sample_x = sample_x[:,0,...]
+    
+    encode_z = args.p_space == 'z'  # Encode in z space?
 
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
+    g_ema = generator
 
     # if args.no_ema or e_ema is None:
     #     e_ema = encoder
@@ -236,7 +259,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
         latent_real, _ = encoder(real_img)
-        fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+        fake_img, _ = generator([latent_real], input_is_latent=not encode_z)
 
         if args.lambda_adv > 0:
             if args.augment:
@@ -272,7 +295,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
             if e_regularize and args.lambda_rec > 0:
                 noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                fake_img, latent_fake = generator(noise, input_is_latent=True, return_latents=True)
+                fake_img, latent_fake = generator(noise, input_is_latent=not encode_z, return_latents=True)
                 latent_pred, _ = encoder(fake_img)
                 if latent_pred.ndim < 3:
                     latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
@@ -296,6 +319,10 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
         #     loss_dict["r1_e"] = r1_loss_e
 
         if not args.no_ema and e_ema is not None:
+            ema_nimg = args.ema_kimg * 1000
+            if args.ema_rampup is not None:
+                ema_nimg = min(ema_nimg, i * args.batch * args.ema_rampup)
+            accum = 0.5 ** (args.batch / max(ema_nimg, 1e-8))
             accumulate(e_ema, e_module, accum)
         
         # Train Discriminator
@@ -304,7 +331,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             requires_grad(discriminator, True)
         if not args.no_update_discriminator and args.lambda_adv > 0:
             latent_real, _ = encoder(real_img)
-            fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+            fake_img, _ = generator([latent_real], input_is_latent=not encode_z)
 
             if args.augment:
                 real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -370,7 +397,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             if i % args.log_every == 0:
                 with torch.no_grad():
                     latent_x, _ = e_ema(sample_x)
-                    fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
+                    fake_x, _ = generator([latent_x], input_is_latent=not encode_z)
                     sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
@@ -381,9 +408,9 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
                     g_ema.eval()
                     e_ema.eval()
                     # Recon
-                    features = extract_feature_from_recon_hybrid(
+                    features = extract_feature_from_reconstruction(
                         e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        mode='recon',
+                        encode_z=encode_z, mode='recon',
                     ).numpy()
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
@@ -417,7 +444,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
                     nrow = int(args.n_sample ** 0.5)
                     nchw = list(sample_x.shape)[1:]
                     latent_real, _ = e_eval(sample_x)
-                    fake_img, _ = generator([latent_real], input_is_latent=True, return_latents=False)
+                    fake_img, _ = generator([latent_real], input_is_latent=not encode_z)
                     sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
                     utils.save_image(
@@ -599,13 +626,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ada_every",
         type=int,
-        default=256,
+        default=8,
         help="probability update interval of the adaptive augmentation",
     )
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
     parser.add_argument("--n_sample_fid", type=int, default=10000, help="number of the samples for calculating FID")
+    parser.add_argument("--p_space", type=str, default='none', help="P-Space (w | p | pn | z)")
+    parser.add_argument("--ema_kimg", type=int, default=10, help="Half-life of the exponential moving average (EMA) of generator weights.")
+    parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
+    parser.add_argument("--n_mlp_g", type=int, default=8)
+    parser.add_argument("--pca_state", type=str, default=None)
 
     args = parser.parse_args()
     util.seed_everything()
@@ -627,7 +659,6 @@ if __name__ == "__main__":
         args.latent_full = args.latent
     else:
         raise NotImplementedError
-    args.n_mlp = 8
 
     args.start_iter = 0
     util.set_log_dir(args)
@@ -638,6 +669,15 @@ if __name__ == "__main__":
 
     elif args.arch == 'swagan':
         from swagan import Generator, Discriminator
+    
+    # PCA state
+    pca_state = None
+    if args.pca_state is not None:
+        pca_state = np.load(args.pca_state)
+        pca_state = {k: torch.from_numpy(pca_state[k]).float().to(args.device) for k in pca_state}
+        pca_state['Lambda'] = pca_state['Lambda'].unsqueeze(0)
+        pca_state['mu'] = pca_state['mu'].unsqueeze(0)
+        pca_state['CT'] = pca_state['C'].T
     
     # Auxiliary models (VGG and PWC)
     vggnet = VGG16(output_layer_idx=args.output_layer_idx).to(device)
@@ -657,7 +697,7 @@ if __name__ == "__main__":
     #     args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
     # ).to(device)
     g_ema = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
+        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier
     ).to(device)
     g_ema.eval()
     # accumulate(g_ema, generator, 0)
@@ -666,28 +706,21 @@ if __name__ == "__main__":
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
+            which_latent=args.which_latent, reshape_latent=False,
             use_wscale=args.use_wscale).to(device)
         if not args.no_ema:
             e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-                which_latent=args.which_latent, reshape_latent=True,
+                which_latent=args.which_latent, reshape_latent=False,
                 use_wscale=args.use_wscale).to(device)
-    elif args.which_encoder == 'debug':
-        from model import EncoderDebug
-        encoder = EncoderDebug(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, stddev_group=args.stddev_group,
-            n_mlp=args.n_latent_mlp, use_residual=args.use_residual_latent_mlp).to(device)
-        if not args.no_ema:
-            e_ema = EncoderDebug(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-                which_latent=args.which_latent, stddev_group=args.stddev_group,
-                n_mlp=args.n_latent_mlp, use_residual=args.use_residual_latent_mlp).to(device)
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, reshape_latent=False, stddev_group=args.stddev_group,
+            p_space=args.p_space, pca_state=pca_state).to(device)
         if not args.no_ema:
             e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-                which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+                which_latent=args.which_latent, reshape_latent=False, stddev_group=args.stddev_group,
+                p_space=args.p_space, pca_state=pca_state).to(device)
     if not args.no_ema:
         e_ema.eval()
         accumulate(e_ema, encoder, 0)
@@ -772,4 +805,4 @@ if __name__ == "__main__":
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
 
-    train(args, loader, loader2, encoder, g_ema, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, device)
+    train(args, loader, loader2, encoder, g_ema, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, pca_state, device)

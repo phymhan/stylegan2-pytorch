@@ -50,9 +50,9 @@ def extract_feature_from_samples(
 
 
 @torch.no_grad()
-def extract_feature_from_recon_hybrid(
+def extract_feature_from_reconstruction(
     encoder, generator, inception, truncation, truncation_latent, loader, device,
-    mode='hybrid', shuffle_idx=None, verbose=False,
+    encode_z=False, mode='hybrid', shuffle_idx=None, verbose=False,
 ):
     # batch_size = loader.batch_size
     features = []
@@ -65,7 +65,7 @@ def extract_feature_from_recon_hybrid(
             if imgs.ndim > 4:  # [N, T, C, H, W]
                 imgs = imgs[:,0,...]
             w, _ = encoder(imgs)
-            img, _ = generator([w], input_is_latent=True)
+            img, _ = generator([w], input_is_latent=not encode_z)
         elif mode == 'hybrid':
             frames1 = imgs[:,0,...]
             frames2 = imgs[:,-1,...]
@@ -78,7 +78,7 @@ def extract_feature_from_recon_hybrid(
             else:  # Shuffle by shuffle_idx
                 j = shuffle_idx[shuffle_idx<frames1.shape[0]] if len(shuffle_idx) > frames1.shape[0] else shuffle_idx
                 dw_ = dw[j]
-            img, _ = generator([w1 + dw_], input_is_latent=True)
+            img, _ = generator([w1 + dw_], input_is_latent=not encode_z)
         feat = inception(img)[0].view(img.shape[0], -1)
         features.append(feat.to("cpu"))
 

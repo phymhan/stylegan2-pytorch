@@ -263,6 +263,20 @@ def get_image_dataset(args, which_dataset='c10', data_root='./data', train=True)
             root=data_root,
             transform=transform
         )
+    elif which_dataset.lower() in ['mnist']:
+        transform = transforms.Compose(
+            [
+                transforms.Resize(args.size),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: torch.cat([x, x, x], 0)),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        dataset = torchvision.datasets.MNIST(
+            root=data_root, download=True,
+            train=train,
+            transform=transform
+        )
     elif which_dataset.lower() in ['cifar10', 'c10']:
         transform = transforms.Compose(
             [

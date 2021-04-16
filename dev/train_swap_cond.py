@@ -622,7 +622,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_layer_idx", type=int, default=23)
     parser.add_argument("--vgg_ckpt", type=str, default="pretrained/vgg16.pth")
     parser.add_argument("--which_encoder", type=str, default='style')
-    parser.add_argument("--which_latent", type=str, default='w_shared')
+    parser.add_argument("--which_latent", type=str, default='w_tied')
     parser.add_argument("--stddev_group", type=int, default=4)
     parser.add_argument("--nframe_num", type=int, default=5)
     parser.add_argument("--shuffle", action='store_true')
@@ -763,7 +763,7 @@ if __name__ == "__main__":
     args.latent = 512  # fixed, dim of w or z (same size)
     if args.which_latent == 'w_plus':
         args.latent_full = args.latent * args.n_latent
-    elif args.which_latent == 'w_shared':
+    elif args.which_latent == 'w_tied':
         args.latent_full = args.latent
     else:
         raise NotImplementedError

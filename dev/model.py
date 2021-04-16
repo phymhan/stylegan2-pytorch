@@ -853,7 +853,7 @@ class Encoder(nn.Module):
         return_tuple=True,  # backward compatibility
     ):
         """
-        which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
+        which_latent: 'w_plus' predict different w for all blocks; 'w_tied' predict
           a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
           'wb_shared' predict shared w and different biases.
         """
@@ -899,7 +899,7 @@ class Encoder(nn.Module):
         self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
         if self.which_latent == 'w_plus':
             out_channel = style_dim * self.n_latent
-        elif self.which_latent == 'w_shared':
+        elif self.which_latent == 'w_tied':
             out_channel = style_dim
         else:
             raise NotImplementedError
@@ -1163,7 +1163,7 @@ class EncoderDebug(nn.Module):
         use_residual=False,
     ):
         """
-        which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
+        which_latent: 'w_plus' predict different w for all blocks; 'w_tied' predict
           a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
           'wb_shared' predict shared w and different biases.
         """
@@ -1209,7 +1209,7 @@ class EncoderDebug(nn.Module):
         self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
         if self.which_latent == 'w_plus':
             out_channel = style_dim * self.n_latent
-        elif self.which_latent == 'w_shared':
+        elif self.which_latent == 'w_tied':
             out_channel = style_dim
         else:
             raise NotImplementedError

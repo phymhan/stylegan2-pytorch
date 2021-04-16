@@ -128,7 +128,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
     parser.add_argument("--train_on_fake", action='store_true', help="train encoder on fake?")
     parser.add_argument("--which_encoder", type=str, default='style')
-    parser.add_argument("--which_latent", type=str, default='w_shared')
+    parser.add_argument("--which_latent", type=str, default='w_tied')
     parser.add_argument("--frame_num", type=int, default=50)
     parser.add_argument("--frame_step", type=int, default=1)
     parser.add_argument("--stddev_group", type=int, default=4)
@@ -182,7 +182,7 @@ if __name__ == "__main__":
     args.latent = 512  # fixed, dim of w or z (same size)
     if args.which_latent == 'w_plus':
         args.latent_full = args.latent * args.n_latent
-    elif args.which_latent == 'w_shared':
+    elif args.which_latent == 'w_tied':
         args.latent_full = args.latent
     else:
         raise NotImplementedError

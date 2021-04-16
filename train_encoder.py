@@ -157,26 +157,6 @@ def load_real_samples(args, data_iter):
     return sample_x
 
 
-# def degaussianize(W, s, C, mu):
-#     if W.shape[1] > C.shape[0]:
-#         return torch.cat([torch.matmul(w * s, C) + m for w in torch.split(W, C.shape[0], 1)], 1)
-#     else:
-#         return torch.matmul(W * s, C) + m
-
-
-# def forward_latent(style, p_space, pca_state=None):
-#     if p_space in ['w', 'none']:  # style is in W
-#         return style
-#     elif p_space in ['p']:  # style is in P
-#         style = F.leaky_relu(style, 0.2)
-#         return style
-#     elif p_space in ['pn']:  # style is in PN
-#         # p = torch.matmul(style * pca_stete['Lambda'], pca_stete['CT']) + pca_stete['mu']
-#         p = degaussianize(style, pca_stete['Lambda'], pca_stete['CT'], pca_stete['mu'])
-#         style = F.leaky_relu(p, 0.2)
-#         return style
-
-
 def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcnet, e_optim, d_optim, e_ema, pca_state, device):
     inception = real_mean = real_cov = mean_latent = None
     if args.eval_every > 0:
@@ -655,12 +635,13 @@ if __name__ == "__main__":
     args.latent = 512  # fixed, dim of w or z (same size)
     if args.which_latent == 'w_plus':
         args.latent_full = args.latent * args.n_latent
-    elif args.which_latent == 'w_shared':
+    elif args.which_latent == 'w_tied':
         args.latent_full = args.latent
     else:
         raise NotImplementedError
 
     args.start_iter = 0
+    args.iter += 1
     util.set_log_dir(args)
     util.print_args(parser, args)
 
@@ -674,7 +655,7 @@ if __name__ == "__main__":
     pca_state = None
     if args.pca_state is not None:
         pca_state = np.load(args.pca_state)
-        pca_state = {k: torch.from_numpy(pca_state[k]).float().to(args.device) for k in pca_state}
+        pca_state = {k: torch.from_numpy(pca_state[k]).float() for k in pca_state}
         pca_state['Lambda'] = pca_state['Lambda'].unsqueeze(0)
         pca_state['mu'] = pca_state['mu'].unsqueeze(0)
         pca_state['CT'] = pca_state['C'].T

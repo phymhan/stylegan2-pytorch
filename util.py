@@ -79,7 +79,7 @@ def print_args(parser, args):
     with open(file_name, 'wt') as f:
         if os.getenv('CUDA_VISIBLE_DEVICES'):
             f.write('CUDA_VISIBLE_DEVICES=%s ' % os.getenv('CUDA_VISIBLE_DEVICES'))
-        f.write(' python ')
+        f.write('python ')
         f.write(' '.join(sys.argv))
         f.write('\n')
 

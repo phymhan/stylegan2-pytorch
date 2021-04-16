@@ -192,6 +192,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # Train Discriminator
         requires_grad(generator, False)
         requires_grad(discriminator, True)
+        if args.debug: util.seed_everything(i)
 
         for step_index in range(args.n_step_d):
             real_img = next(loader).to(device)
@@ -243,7 +244,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
         # Train Generator
         requires_grad(generator, True)
         requires_grad(discriminator, False)
-        # real_img = real_imgs[0]
+        if args.debug: util.seed_everything(i)
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         fake_img, _ = generator(noise)
@@ -364,7 +365,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
                     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                # print("fid:", fid)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
                     f.write(f"{i:07d}; fid: {float(fid):.4f};\n")
 
@@ -412,7 +412,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
     parser.add_argument("--save_every", type=int, default=1000, help="save checkpoints every # iters")
-    parser.add_argument("--save_latest_every", type=int, default=100, help="save latest checkpoints every # iters")
+    parser.add_argument("--save_latest_every", type=int, default=200, help="save latest checkpoints every # iters")
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -504,6 +504,7 @@ if __name__ == "__main__":
         default=8,
         help="probability update interval of the adaptive augmentation",
     )
+    parser.add_argument("--debug", action='store_true')
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
@@ -531,6 +532,7 @@ if __name__ == "__main__":
     # args.n_mlp = 8
 
     args.start_iter = 0
+    args.iter += 1
     util.set_log_dir(args)
     util.print_args(parser, args)
 
@@ -610,7 +612,7 @@ if __name__ == "__main__":
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
-        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
+        sampler=data_sampler(dataset, shuffle=False, distributed=args.distributed),
         drop_last=True,
     )
 

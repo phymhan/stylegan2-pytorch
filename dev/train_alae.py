@@ -341,7 +341,7 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         fake_img, latent_fake = generator(noise, return_latents=True)
-        if args.which_latent == 'w_shared':
+        if args.which_latent == 'w_tied':
             latent_fake = latent_fake[:,0,:]
         else:
             latent_fake = latent_fake.view(args.batch, -1)
@@ -650,7 +650,7 @@ if __name__ == "__main__":
     args.latent = 512
     if args.which_latent == 'w_plus':
         args.latent_full = args.latent * args.n_latent
-    elif args.which_latent == 'w_shared':
+    elif args.which_latent == 'w_tied':
         args.latent_full = args.latent
     else:
         raise NotImplementedError

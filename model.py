@@ -696,22 +696,26 @@ class ConvLayer(nn.Sequential):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channel, out_channel, blur_kernel=[1, 3, 3, 1]):
+    def __init__(self, in_channel, out_channel, blur_kernel=[1, 3, 3, 1], architecture='resnet'):
         super().__init__()
+
+        self.architecture = architecture
 
         self.conv1 = ConvLayer(in_channel, in_channel, 3)
         self.conv2 = ConvLayer(in_channel, out_channel, 3, downsample=True)
 
-        self.skip = ConvLayer(
-            in_channel, out_channel, 1, downsample=True, activate=False, bias=False
-        )
+        if architecture == 'resnet':
+            self.skip = ConvLayer(
+                in_channel, out_channel, 1, downsample=True, activate=False, bias=False
+            )
 
     def forward(self, input):
         out = self.conv1(input)
         out = self.conv2(out)
 
-        skip = self.skip(input)
-        out = (out + skip) / math.sqrt(2)
+        if self.architecture == 'resnet':
+            skip = self.skip(input)
+            out = (out + skip) / math.sqrt(2)
 
         return out
 
@@ -724,6 +728,7 @@ class Discriminator(nn.Module):
         blur_kernel=[1, 3, 3, 1],
         in_channel=3,
         stddev_group=4,
+        architecture='resnet',
         which_phi='vec'
     ):
         """
@@ -745,6 +750,7 @@ class Discriminator(nn.Module):
             1024: 16 * channel_multiplier,
         }
 
+        self.architecture = architecture
         self.which_phi = which_phi
         if self.which_phi == 'vec':
             self.embed_dim = channels[4] * 4 * 4
@@ -762,7 +768,11 @@ class Discriminator(nn.Module):
         for i in range(log_size, 2, -1):
             out_channel = channels[2 ** (i - 1)]
 
-            convs.append(ResBlock(in_channel, out_channel, blur_kernel))
+            convs.append(
+                ResBlock(in_channel, out_channel, blur_kernel,
+                    architecture=architecture,
+                )
+            )
 
             in_channel = out_channel
 
@@ -821,11 +831,11 @@ class Encoder(nn.Module):
         stddev_feat=1,
         reparameterization=False,
         return_tuple=True,  # backward compatibility
-        p_space='none',
+        p_space='w',
         pca_state=None,
     ):
         """
-        which_latent: 'w_plus' predict different w for all blocks; 'w_shared' predict
+        which_latent: 'w_plus' predict different w for all blocks; 'w_tied' predict
           a single w for all blocks; 'wb' predict w and b (bias) for all blocks;
           'wb_shared' predict shared w and different biases.
         """
@@ -854,7 +864,8 @@ class Encoder(nn.Module):
         self.reparameterization = reparameterization
         self.return_tuple = return_tuple
         self.p_space = p_space
-        self.pca_state = pca_state
+        # self.pca_state = pca_state
+        self.register_buffer('pca_state', pca_state)
         assert((p_space in ['none', 'w', 'p', 'z']) or (pca_state is not None))
 
         in_channel = channels[size]
@@ -874,7 +885,7 @@ class Encoder(nn.Module):
         self.final_conv = ConvLayer(in_channel + (self.stddev_group > 1), channels[4], 3)
         if self.which_latent == 'w_plus':
             out_channel = style_dim * self.n_latent
-        elif self.which_latent == 'w_shared':
+        elif self.which_latent == 'w_tied':
             out_channel = style_dim
         else:
             raise NotImplementedError

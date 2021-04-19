@@ -315,6 +315,28 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                 )
             )
 
+            if i % args.log_every == 0:
+                with torch.no_grad():
+                    g_ema.eval()
+                    sample, _ = g_ema([sample_z])
+                    utils.save_image(
+                        sample,
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
+                        nrow=int(args.n_sample ** 0.5),
+                        normalize=True,
+                        range=(-1, 1),
+                    )
+                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                    f.write(
+                        (
+                            f"{i:07d}; "
+                            f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
+                            f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
+                            f"augment: {ada_aug_p:.4f}; "
+                            f"\n"
+                        )
+                    )
+            
             if wandb and args.wandb:
                 wandb.log(
                     {
@@ -331,29 +353,6 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     }
                 )
             
-            if i % args.log_every == 0:
-                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
-                    f.write(
-                        (
-                            f"{i:07d}; "
-                            f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
-                            f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
-                            f"augment: {ada_aug_p:.4f};\n"
-                        )
-                    )
-
-            if i % args.log_every == 0:
-                with torch.no_grad():
-                    g_ema.eval()
-                    sample, _ = g_ema([sample_z])
-                    utils.save_image(
-                        sample,
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
-                        nrow=int(args.n_sample ** 0.5),
-                        normalize=True,
-                        range=(-1, 1),
-                    )
-            
             if args.eval_every > 0 and i % args.eval_every == 0:
                 with torch.no_grad():
                     g_ema.eval()
@@ -366,7 +365,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                     sample_cov = np.cov(features, rowvar=False)
                     fid = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
                 with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; fid: {float(fid):.4f};\n")
+                    f.write(f"{i:07d}; sample: {float(fid):.4f};\n")
 
             if i % args.save_every == 0:
                 torch.save(

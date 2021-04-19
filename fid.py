@@ -16,9 +16,11 @@ st = pdb.set_trace
 def extract_feature_from_samples(
     generator, inception, truncation, truncation_latent, batch_size, n_sample, device,
     prior=None, samples=None, verbose=False, n_classes=-1,
+    mode='sample', encoder=None, encode_z=False,
 ):
     # generator is conditional if n_classes > 0
     conditional = n_classes > 0
+    assert((mode == 'sample') or (encoder is not None))
     n_batch = n_sample // batch_size
     resid = n_sample - (n_batch * batch_size)
     batch_sizes = [batch_size] * n_batch + [resid] if resid > 0 else [batch_size] * n_batch
@@ -41,6 +43,9 @@ def extract_feature_from_samples(
             else:
                 latent = prior(latent)
                 img, _ = generator([latent], input_is_latent=True, truncation=truncation, truncation_latent=truncation_latent)
+        if mode == 'recon':
+            w, _ = encoder(img)
+            img, _ = generator([w], input_is_latent=not encode_z)
         feat = inception(img)[0].view(img.shape[0], -1)
         features.append(feat.to("cpu"))
 

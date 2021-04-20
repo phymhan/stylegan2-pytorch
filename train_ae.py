@@ -406,7 +406,7 @@ def train(args, loader, loader2, generator, encoder, discriminator,
                     sample, _ = g_ema([sample_z])
                     utils.save_image(
                         sample,
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=int(args.n_sample ** 0.5),
                         normalize=True,
                         range=(-1, 1),

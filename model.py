@@ -506,6 +506,9 @@ class Generator(nn.Module):
 
         self.n_latent = self.log_size * 2 - 2
 
+    def get_last_layer(self):
+        return [self.to_rgbs[-1].conv.weight, self.convs[-1].conv.weight]
+
     def make_noise(self):
         device = self.input.input.device
 

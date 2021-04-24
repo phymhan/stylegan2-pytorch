@@ -7,6 +7,8 @@ import shutil
 import random
 import numpy as np
 from torchvision.io import write_video
+from torchvision import utils
+from torch.nn import functional as F
 
 
 class AverageMeter(object):
@@ -141,6 +143,11 @@ def get_nframe_num(args):
     return nframe_num_list
 
 
+def save_image(ximg, path):
+    n_sample = ximg.shape[0]
+    utils.save_image(ximg, path, nrow=int(n_sample ** 0.5), normalize=True, range=(-1, 1))
+
+
 def save_video(xseq, path):
     video = xseq.data.cpu().clamp(-1, 1)
     video = ((video+1.)/2.*255).type(torch.uint8).permute(0, 2, 3, 1)
@@ -179,32 +186,37 @@ def estimate_optical_flow(netNetwork, tenFirst, tenSecond):
     return tenFlow[0, :, :, :]
 
 
-def unstack(tensor: torch.Tensor, dimensions: int):
-    """
-    Borrowed from:
-    https://discuss.pytorch.org/t/how-to-divide-a-tensor-with-size-mxn-to-smaller-tensors/35052/8
+def randperm(n, ordered=False):
+    # ordered: include ordered permutation?
+    if not ordered:
+        perm_ord = torch.tensor(range(n))
+        while True:
+            perm = torch.randperm(n)
+            if (perm != perm_ord).any():
+                return perm
+    else:
+        return torch.randperm(n)
 
-    Unstacks the provided image tensor into the specified amount of dimensions. 
-    Expects a tensor in the shape of bs x c x n x n, where bs is the batch size,
-    c is the number of channels. Unpacks the image to the size 
-    (n / dimensions) ^2 * bs, c, dimensions, dimensions
 
-    Parameters:
-    - tensor (torch.Tensor): Image tensor to unstack
-    - dimensions (int): Dimensions to unpack to.
+def permute_dim(tensor, i=0, j=1, ordered=False):
+    # Permute along dim i for each j.
+    # e.g.: Factor-VAE, i = 0, j = 1; Jigsaw, i = 2, j = 0
+    device = tensor.device
+    n = tensor.shape[i]
+    return torch.cat([torch.index_select(t, i, randperm(n, ordered).to(device)) for t in tensor.split(1, j)], j)
 
-    Returns
-    - tensor (torch.Tensor): Unstacked image tensor
-    """
 
-    n, c, h, w = tensor.shape
-    assert h == w, "Image tensor must be square" 
-    assert h % dimensions == 0, "Cannot unpack the image into that shape"
-
-    # Unfold the tensor to the specified dimensions
-    tensor = tensor.unfold(1, 1, 1).unfold(2, dimensions, dimensions).unfold(3, dimensions, dimensions)
-
-    # Reshape the tensor to be the shape
-    tensor = tensor.squeeze().permute(2, 1, 0, 3, 4).reshape(-1, c, dimensions, dimensions)
-
-    return tensor
+"""
+Negative Data Augmentations
+"""
+def negative_augment(img, nda_type='jigsaw_4'):
+    img_aug = None
+    if nda_type.startswith('jigsaw'):
+        n, c, h, w = img.shape
+        n_patch = int(nda_type.split('_')[1])  # number of patches
+        n_patch_sqrt = int(n_patch ** 0.5)
+        h_patch, w_patch = h//n_patch_sqrt, w//n_patch_sqrt
+        patches = F.unfold(img, kernel_size=(h_patch, w_patch), stride=(h_patch, w_patch))
+        patches_perm = permute_dim(patches, 2, 0)
+        img_aug = F.fold(patches_perm, (h, w), kernel_size=(h_patch, w_patch), stride=(h_patch, w_patch))
+    return img_aug, None

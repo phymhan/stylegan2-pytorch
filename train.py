@@ -38,20 +38,6 @@ from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
 
 
-def negative_augment(img, nda_type='jigsaw_4'):
-    img_aug = None
-    if 'jigsaw' in nda_type:
-        n, c, h, w = img.shape
-        n_patch = int(nda_type.split('_')[1])  # number of patches
-        n_patch_sqrt = int(n_patch ** 0.5)
-        h_patch, w_patch = h//n_patch_sqrt, w//n_patch_sqrt
-        idx = random.choice(list(permutations(range(n_patch)))[1:])
-        patches = F.unfold(img, kernel_size=(h_patch, w_patch), stride=(h_patch, w_patch))
-        patches_perm = patches[:,:,idx]
-        img_aug = F.fold(patches_perm, (h, w), kernel_size=(h_patch, w_patch), stride=(h_patch, w_patch))
-    return img_aug, None
-
-
 def data_sampler(dataset, shuffle, distributed):
     if distributed:
         return data.distributed.DistributedSampler(dataset, shuffle=shuffle)
@@ -229,7 +215,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
 
             d_loss_fake2 = 0
             if args.lambda_nda < 1:
-                fake_img2, _ = negative_augment(real_img)
+                fake_img2, _ = util.negative_augment(real_img, args.nda_type)
                 if args.augment:
                     fake_img2, _ = augment(fake_img2, ada_aug_p)
                 fake_pred2 = discriminator(fake_img2)
@@ -544,6 +530,7 @@ if __name__ == "__main__":
     parser.add_argument("--ema_kimg", type=int, default=10, help="Half-life of the exponential moving average (EMA) of generator weights.")
     parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
     parser.add_argument("--lambda_nda", type=float, default=1, help="the weight before G(z)")
+    parser.add_argument("--nda_type", type=str, default='jigsaw_4')
 
     args = parser.parse_args()
     util.seed_everything()

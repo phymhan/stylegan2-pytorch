@@ -16,6 +16,7 @@ import util
 from calc_inception import load_patched_inception_v3
 from fid import extract_feature_from_samples, calc_fid
 import pickle
+from itertools import permutations
 import pdb
 st = pdb.set_trace
 
@@ -35,6 +36,20 @@ from distributed import (
 )
 from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
+
+
+def negative_augment(img, nda_type='jigsaw_4'):
+    img_aug = None
+    if 'jigsaw' in nda_type:
+        n, c, h, w = img.shape
+        n_patch = int(nda_type.split('_')[1])  # number of patches
+        n_patch_sqrt = int(n_patch ** 0.5)
+        h_patch, w_patch = h//n_patch_sqrt, w//n_patch_sqrt
+        idx = random.choice(list(permutations(range(n_patch)))[1:])
+        patches = F.unfold(img, kernel_size=(h_patch, w_patch), stride=(h_patch, w_patch))
+        patches_perm = patches[:,:,idx]
+        img_aug = F.fold(patches_perm, (h, w), kernel_size=(h_patch, w_patch), stride=(h_patch, w_patch))
+    return img_aug, None
 
 
 def data_sampler(dataset, shuffle, distributed):
@@ -207,9 +222,23 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
             else:
                 real_img_aug = real_img
 
-            fake_pred = discriminator(fake_img)
             real_pred = discriminator(real_img_aug)
-            d_loss = d_logistic_loss(real_pred, fake_pred)
+            fake_pred = discriminator(fake_img)
+            d_loss_real = F.softplus(-real_pred).mean()
+            d_loss_fake = F.softplus(fake_pred).mean()
+
+            d_loss_fake2 = 0
+            if args.lambda_nda < 1:
+                fake_img2, _ = negative_augment(real_img)
+                if args.augment:
+                    fake_img2, _ = augment(fake_img2, ada_aug_p)
+                fake_pred2 = discriminator(fake_img2)
+                d_loss_fake2 = F.softplus(fake_pred2).mean()
+
+            d_loss = (
+                d_loss_real + 
+                d_loss_fake * args.lambda_nda + d_loss_fake2 * (1-args.lambda_nda)
+            )
 
             loss_dict["d"] = d_loss
             loss_dict["real_score"] = real_pred.mean()
@@ -514,6 +543,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_mlp_g", type=int, default=8)
     parser.add_argument("--ema_kimg", type=int, default=10, help="Half-life of the exponential moving average (EMA) of generator weights.")
     parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
+    parser.add_argument("--lambda_nda", type=float, default=1, help="the weight before G(z)")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -611,7 +641,7 @@ if __name__ == "__main__":
     loader = data.DataLoader(
         dataset,
         batch_size=args.batch,
-        sampler=data_sampler(dataset, shuffle=False, distributed=args.distributed),
+        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
         drop_last=True,
     )
 

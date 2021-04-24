@@ -384,7 +384,7 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
         # Train Encoder
         requires_grad(encoder, True)
         requires_grad(discriminator, False)
-        requires_grad(generator, args.train_ge)
+        requires_grad(generator, args.joint)
         if discriminator2 is not None:
             requires_grad(discriminator2, False)
         pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
@@ -419,7 +419,7 @@ def train(args, loader, generator, encoder, discriminator, discriminator2,
             loss_dict["vgg"] = vgg_loss
             loss_dict["adv"] = adv_loss
 
-            if args.train_ge:
+            if args.joint:
                 encoder.zero_grad()
                 generator.zero_grad()
                 e_loss.backward()
@@ -687,7 +687,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_fake_g", type=float, default=1.0)
     parser.add_argument("--lambda_rec_g", type=float, default=0)
     parser.add_argument("--pix_loss", type=str, default='l2')
-    parser.add_argument("--train_ge", action='store_true', help="update generator with encoder")
+    parser.add_argument("--joint", action='store_true', help="update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")

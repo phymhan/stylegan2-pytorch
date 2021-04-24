@@ -698,7 +698,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_fake_d", type=float, default=1.0)
     parser.add_argument("--lambda_rec_d", type=float, default=1.0)
     parser.add_argument("--pix_loss", type=str, default='l2')
-    parser.add_argument("--train_ge", action='store_true', help="update generator with encoder")
+    parser.add_argument("--joint", action='store_true', help="update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")

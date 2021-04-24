@@ -177,3 +177,34 @@ def estimate_optical_flow(netNetwork, tenFirst, tenSecond):
     tenFlow[:, 1, :, :] *= float(intHeight) / float(intPreprocessedHeight)
 
     return tenFlow[0, :, :, :]
+
+
+def unstack(tensor: torch.Tensor, dimensions: int):
+    """
+    Borrowed from:
+    https://discuss.pytorch.org/t/how-to-divide-a-tensor-with-size-mxn-to-smaller-tensors/35052/8
+
+    Unstacks the provided image tensor into the specified amount of dimensions. 
+    Expects a tensor in the shape of bs x c x n x n, where bs is the batch size,
+    c is the number of channels. Unpacks the image to the size 
+    (n / dimensions) ^2 * bs, c, dimensions, dimensions
+
+    Parameters:
+    - tensor (torch.Tensor): Image tensor to unstack
+    - dimensions (int): Dimensions to unpack to.
+
+    Returns
+    - tensor (torch.Tensor): Unstacked image tensor
+    """
+
+    n, c, h, w = tensor.shape
+    assert h == w, "Image tensor must be square" 
+    assert h % dimensions == 0, "Cannot unpack the image into that shape"
+
+    # Unfold the tensor to the specified dimensions
+    tensor = tensor.unfold(1, 1, 1).unfold(2, dimensions, dimensions).unfold(3, dimensions, dimensions)
+
+    # Reshape the tensor to be the shape
+    tensor = tensor.squeeze().permute(2, 1, 0, 3, 4).reshape(-1, c, dimensions, dimensions)
+
+    return tensor

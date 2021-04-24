@@ -232,19 +232,22 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         else:
             d2_module = discriminator2
 
-    disc_factor = torch.tensor(1.0, device=device)
+    # When joint training enabled, d_weight balances reconstruction loss and adversarial loss on 
+    # recontructed real images. This does not balance the overall AE loss and GAN loss.
+    d_weight = torch.tensor(1.0, device=device)
     last_layer = None
     if args.use_adaptive_weight:
         if args.distributed:
             last_layer = generator.module.get_last_layer()
         else:
             last_layer = generator.get_last_layer()
+    g_scale = 1
 
     # accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
     r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
-    g_scale = 1
+
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
     ada_aug_p2 = args.augment_p if args.augment_p > 0 else 0.0
@@ -338,10 +341,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             for step_index in range(args.n_step_e):  # n_step_d2 is same as n_step_e
                 real_img = real_imgs[step_index]
                 latent_real, _ = encoder(real_img)
-                if args.use_ema_g:
-                    rec_img, _ = g_ema([latent_real], input_is_latent=True)
-                else:
-                    rec_img, _ = generator([latent_real], input_is_latent=True)
+                rec_img, _ = generator([latent_real], input_is_latent=True)
                 if args.augment:
                     real_img_aug, _ = augment(real_img, ada_aug_p2)
                     rec_img, _ = augment(rec_img, ada_aug_p2)
@@ -375,8 +375,9 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
 
         # Train Encoder
+        joint = args.joint and g_scale > 1e-6
         requires_grad(encoder, True)
-        requires_grad(generator, args.train_ge)
+        requires_grad(generator, joint)
         requires_grad(discriminator, False)
         requires_grad(discriminator2, False)
         if args.debug: util.seed_everything(i)
@@ -384,10 +385,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         for step_index in range(args.n_step_e):
             real_img = real_imgs[step_index]
             latent_real, _ = encoder(real_img)
-            if args.use_ema_g:
-                rec_img, _ = g_ema([latent_real], input_is_latent=True)
-            else:
-                rec_img, _ = generator([latent_real], input_is_latent=True)
+            rec_img, _ = generator([latent_real], input_is_latent=True)
             if args.lambda_pix > 0:
                 if args.pix_loss == 'l2':
                     pix_loss = torch.mean((rec_img - real_img) ** 2)
@@ -415,7 +413,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             if args.use_adaptive_weight and i >= args.disc_iter_start:
                 nll_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg
                 g_loss = adv_loss * args.lambda_adv
-                disc_factor = calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
+                d_weight = calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
 
             rec_w_loss = rec_fake_loss = 0
             if args.lambda_rec_w > 0:
@@ -438,20 +436,20 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 elif args.pix_loss == 'l1':
                     rec_fake_loss = F.l1_loss(fake_rec, fake_img)
 
-            e_loss = (
+            ae_loss = (
                 pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + 
-                disc_factor * adv_loss * args.lambda_adv + 
+                d_weight * adv_loss * args.lambda_adv + 
                 rec_w_loss * args.lambda_rec_w + rec_fake_loss * args.lambda_rec_fake
             )
-            loss_dict["e"] = e_loss
+            loss_dict["ae"] = ae_loss
             loss_dict["pix"] = pix_loss
             loss_dict["vgg"] = vgg_loss
             loss_dict["adv"] = adv_loss
 
-            if args.train_ge:
+            if joint:
                 encoder.zero_grad()
                 generator.zero_grad()
-                e_loss.backward()
+                ae_loss.backward()
                 e_optim.step()
                 if args.g_decay is not None:
                     scale_grad(generator, g_scale)
@@ -459,7 +457,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 g_optim.step()
             else:
                 encoder.zero_grad()
-                e_loss.backward()
+                ae_loss.backward()
                 e_optim.step()
 
         # Train Generator
@@ -510,6 +508,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         loss_reduced = reduce_loss_dict(loss_dict)
         d_loss_val = loss_reduced["d"].mean().item()
         g_loss_val = loss_reduced["g"].mean().item()
+        ae_loss_val = loss_reduced["ae"].mean().item()
         r1_val = loss_reduced["r1"].mean().item()
         path_loss_val = loss_reduced["path"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
@@ -525,10 +524,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
-                    f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
+                    f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; ae: {ae_loss_val:.4f}; "
+                    f"g: {g_loss_val:.4f}; path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
                     f"augment: {ada_aug_p:.4f}; "
-                    f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}"
+                    f"d_weight: {d_weight.item():.4f}; "
+                    # f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}"
                 )
             )
 
@@ -572,14 +572,14 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     f.write(
                         (
                             f"{i:07d}; "
-                            f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
-                            f"path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
+                            f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; ae: {ae_loss_val:.4f}; "
+                            f"g: {g_loss_val:.4f}; path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
                             f"augment: {ada_aug_p:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
                             f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f}; "
                             f"pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; "
                             f"ref_pix: {ref_pix_loss.item():.4f}; ref_vgg: {ref_vgg_loss.item():.4f}; "
                             # f"gz_pix: {gz_pix_loss.item():.4f}; gz_vgg: {gz_vgg_loss.item():.4f}; "
-                            f"d_factor: {disc_factor.item():.4f}; "
+                            f"d_weight: {d_weight.item():.4f}; "
                             f"\n"
                         )
                     )
@@ -802,7 +802,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_rec_w", type=float, default=0, help="recon sampled w")
     parser.add_argument("--lambda_rec_fake", type=float, default=0, help="recon fake image")
     parser.add_argument("--pix_loss", type=str, default='l2')
-    parser.add_argument("--train_ge", action='store_true', help="update generator with encoder")
+    parser.add_argument("--joint", action='store_true', help="update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
@@ -824,7 +824,6 @@ if __name__ == "__main__":
     parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
     parser.add_argument("--no_ema_e", action='store_true')
     parser.add_argument("--no_ema_g", action='store_true')
-    parser.add_argument("--use_ema_g", action='store_true', help="use g_ema to train encoder")
     parser.add_argument("--which_metric", type=str, nargs='*', default=['fid_sample', 'fid_sample_recon', 'fid_recon'])
     parser.add_argument("--use_adaptive_weight", action='store_true', help="adaptive weight borrowed from VQGAN")
     parser.add_argument("--disc_iter_start", type=int, default=30000)
@@ -851,8 +850,7 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
 
-    assert((not args.use_ema_g) or (not args.train_ge))  # use_ema_g only for debugging purpose for now
-    assert((not args.use_adaptive_weight) or args.train_ge)
+    assert((not args.use_adaptive_weight) or args.joint)
 
     args.start_iter = 0
     args.iter += 1
@@ -906,17 +904,15 @@ if __name__ == "__main__":
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
-            use_wscale=args.use_wscale).to(device)
+            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
         e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
-            use_wscale=args.use_wscale).to(device)
+            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, stddev_group=args.stddev_group).to(device)
         e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, stddev_group=args.stddev_group).to(device)
     e_ema.eval()
     accumulate(e_ema, encoder, 0)
     
@@ -1022,7 +1018,7 @@ if __name__ == "__main__":
     loader = data.DataLoader(
         dataset1,
         batch_size=args.batch,
-        sampler=data_sampler(dataset1, shuffle=False, distributed=args.distributed),
+        sampler=data_sampler(dataset1, shuffle=True, distributed=args.distributed),
         drop_last=True,
         num_workers=args.num_workers,
     )

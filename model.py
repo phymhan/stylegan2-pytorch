@@ -829,7 +829,6 @@ class Encoder(nn.Module):
         channel_multiplier=2,
         blur_kernel=[1, 3, 3, 1],
         which_latent='w_plus',
-        reshape_latent=False,
         stddev_group=4,
         stddev_feat=1,
         reparameterization=False,
@@ -862,7 +861,6 @@ class Encoder(nn.Module):
         self.n_latent = log_size * 2 - 2  # copied from Generator
         self.n_noises = (log_size - 2) * 2 + 1
         self.which_latent = which_latent
-        self.reshape_latent = reshape_latent
         self.style_dim = style_dim
         self.reparameterization = reparameterization
         self.return_tuple = return_tuple

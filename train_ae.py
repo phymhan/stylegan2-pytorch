@@ -615,7 +615,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_rec_d", type=float, default=1.0, help="d1, recon of real image")
     parser.add_argument("--pix_loss", type=str, default='l2')
-    parser.add_argument("--train_ge", action='store_true', help="update generator with encoder")
+    parser.add_argument("--joint", action='store_true', help="update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
@@ -701,17 +701,15 @@ if __name__ == "__main__":
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
-            use_wscale=args.use_wscale).to(device)
+            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
         e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
-            use_wscale=args.use_wscale).to(device)
+            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, stddev_group=args.stddev_group).to(device)
         e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, stddev_group=args.stddev_group).to(device)
     e_ema.eval()
     accumulate(e_ema, encoder, 0)
     
@@ -801,7 +799,7 @@ if __name__ == "__main__":
     loader = data.DataLoader(
         dataset1,
         batch_size=args.batch,
-        sampler=data_sampler(dataset1, shuffle=False, distributed=args.distributed),
+        sampler=data_sampler(dataset1, shuffle=True, distributed=args.distributed),
         drop_last=True,
         num_workers=args.num_workers,
     )

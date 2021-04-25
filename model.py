@@ -762,12 +762,6 @@ class Discriminator(nn.Module):
 
         self.architecture = architecture
         self.which_phi = which_phi
-        if self.which_phi == 'vec':
-            self.embed_dim = channels[4] * 4 * 4
-        elif self.which_phi in ['avg1', 'avg2']:
-            self.embed_dim = channels[4]
-        else:
-            raise NotImplementedError
 
         convs = [ConvLayer(in_channel, channels[size], 1)]
 
@@ -839,7 +833,7 @@ class Discriminator(nn.Module):
         out = torch.cat([out, stddev], 1)
 
         out = self.final_conv(out)
-        out = self.final_linear(h)
+        out = self.final_linear(out)
 
         return out
 

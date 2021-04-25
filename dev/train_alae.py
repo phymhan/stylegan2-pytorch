@@ -346,7 +346,7 @@ def train(args, loader, generator, encoder, discriminator, vggnet, g_optim, e_op
         else:
             latent_fake = latent_fake.view(args.batch, -1)
         latent_pred, _ = encoder(fake_img)
-        e_loss_rec = torch.mean((latent_fake - latent_pred) ** 2)
+        e_loss_rec = torch.mean((latent_fake.detach() - latent_pred) ** 2)
 
         e_loss = e_loss_rec
 

@@ -943,7 +943,7 @@ class Discriminator(nn.Module):
         elif self.which_phi == 'lin1':
             self.block_phi = nn.Sequential(
                 Reshape(),
-                EqualLinear(channels[4] * 4 * 4, channels[4], activation="fused_lrelu"))
+                EqualLinear(channels[4] * 4 * 4, channels[4]))
             self.block_psi = EqualLinear(channels[4], 1)
         elif self.which_phi == 'lin2':
             self.block_phi = nn.Sequential(

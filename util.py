@@ -188,14 +188,14 @@ def estimate_optical_flow(netNetwork, tenFirst, tenSecond):
 
 def randperm(n, ordered=False):
     # ordered: include ordered permutation?
-    if not ordered:
+    if ordered:
+        return torch.randperm(n)
+    else:
         perm_ord = torch.tensor(range(n))
         while True:
             perm = torch.randperm(n)
             if (perm != perm_ord).any():
-                return perm
-    else:
-        return torch.randperm(n)
+                return perm        
 
 
 def permute_dim(tensor, i=0, j=1, ordered=False):

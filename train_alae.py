@@ -212,7 +212,13 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     path_loss = torch.tensor(0.0, device=device)
     path_lengths = torch.tensor(0.0, device=device)
     mean_path_length_avg = 0
-    loss_dict = {}
+    loss_dict = {
+        'recx_score': torch.tensor(0.0, device=device),
+        'ae_fake': torch.tensor(0.0, device=device),
+        'ae_real': torch.tensor(0.0, device=device),
+        'pix': torch.tensor(0.0, device=device),
+        'vgg': torch.tensor(0.0, device=device),
+    }
     avg_pix_loss = util.AverageMeter()
     avg_vgg_loss = util.AverageMeter()
 
@@ -224,7 +230,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         g_module = generator
         e_module = encoder
         d_module = discriminator
-    
+
     d2_module = None
     if discriminator2 is not None:
         if args.distributed:
@@ -243,16 +249,12 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             last_layer = generator.get_last_layer()
     g_scale = 1
 
-    # accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
     r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
 
     if args.augment and args.augment_p == 0:
         ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
-    ada_aug_p2 = args.augment_p if args.augment_p > 0 else 0.0
-    if args.decouple_d and args.augment and args.augment_p == 0:
-        ada_augment2 = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
     sample_x = load_real_samples(args, loader)
@@ -274,47 +276,51 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         if args.debug: util.seed_everything(i)
         real_imgs = [next(loader).to(device) for _ in range(n_step_max)]
 
-        # Train Discriminator
+        # Train Discriminator and Encoder
         requires_grad(generator, False)
-        requires_grad(encoder, False)
+        requires_grad(encoder, True)
         requires_grad(discriminator, True)
+        requires_grad(discriminator2, True)
         for step_index in range(args.n_step_d):
             real_img = real_imgs[step_index]
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
             fake_img, _ = generator(noise)
             if args.augment:
                 real_img_aug, _ = augment(real_img, ada_aug_p)
-                fake_img, _ = augment(fake_img, ada_aug_p)
+                fake_img_aug, _ = augment(fake_img, ada_aug_p)
             else:
                 real_img_aug = real_img
-            fake_pred = discriminator(fake_img)
-            real_pred = discriminator(real_img_aug)
-            d_loss_fake = F.softplus(fake_pred).mean()
+                fake_img_aug = fake_img
+            real_pred = discriminator(encoder(real_img_aug)[0])
+            fake_pred = discriminator(encoder(fake_img_aug)[0])
             d_loss_real = F.softplus(-real_pred).mean()
+            d_loss_fake = F.softplus(fake_pred).mean()
             loss_dict["real_score"] = real_pred.mean()
             loss_dict["fake_score"] = fake_pred.mean()
 
             d_loss_rec = 0.
-            if args.lambda_rec_d > 0 and not args.decouple_d:  # Do not train D on x_rec if decouple_d
+            if args.lambda_rec_d > 0:
                 latent_real, _ = encoder(real_img)
                 rec_img, _ = generator([latent_real], input_is_latent=True)
                 if args.augment:
                     rec_img, _ = augment(rec_img, ada_aug_p)
-                rec_pred = discriminator(rec_img)
+                rec_pred = discriminator(encoder(rec_img)[0])
                 d_loss_rec = F.softplus(rec_pred).mean()
                 loss_dict["recx_score"] = rec_pred.mean()
+                r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
 
             d_loss = d_loss_real + d_loss_fake * args.lambda_fake_d + d_loss_rec * args.lambda_rec_d
             loss_dict["d"] = d_loss
 
             discriminator.zero_grad()
+            encoder.zero_grad()
             d_loss.backward()
             d_optim.step()
+            e_optim.step()
 
         if args.augment and args.augment_p == 0:
             ada_aug_p = ada_augment.tune(real_pred)
             r_t_stat = ada_augment.r_t_stat
-        # Compute batchwise r_t
         r_t_dict['real'] = torch.sign(real_pred).sum().item() / args.batch
         r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
 
@@ -325,143 +331,27 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 real_img_aug, _ = augment(real_img, ada_aug_p)
             else:
                 real_img_aug = real_img
-            real_pred = discriminator(real_img_aug)
+            real_pred = discriminator(encoder(real_img_aug)[0])
             r1_loss = d_r1_loss(real_pred, real_img)
             discriminator.zero_grad()
+            encoder.zero_grad()
             (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
             d_optim.step()
+            e_optim.step()
         loss_dict["r1"] = r1_loss
-        
-        # Train Discriminator2
-        if args.decouple_d and discriminator2 is not None:
-            requires_grad(generator, False)
-            requires_grad(encoder, False)
-            requires_grad(discriminator2, True)
-            if args.debug: util.seed_everything(i)
-            for step_index in range(args.n_step_e):  # n_step_d2 is same as n_step_e
-                real_img = real_imgs[step_index]
-                latent_real, _ = encoder(real_img)
-                rec_img, _ = generator([latent_real], input_is_latent=True)
-                if args.augment:
-                    real_img_aug, _ = augment(real_img, ada_aug_p2)
-                    rec_img, _ = augment(rec_img, ada_aug_p2)
-                else:
-                    real_img_aug = real_img
-                rec_pred = discriminator2(rec_img)
-                real_pred = discriminator2(real_img_aug)
-                d2_loss_rec = F.softplus(rec_pred).mean()
-                d2_loss_real = F.softplus(-real_pred).mean()
-
-                d2_loss = d2_loss_real + d2_loss_rec
-                loss_dict["d2"] = d2_loss
-                loss_dict["recx_score"] = rec_pred.mean()
-
-                discriminator2.zero_grad()
-                d2_loss.backward()
-                d2_optim.step()
-
-            d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
-            if d_regularize:
-                real_img.requires_grad = True
-                real_pred = discriminator2(real_img)
-                r1_loss = d_r1_loss(real_pred, real_img)
-                discriminator2.zero_grad()
-                (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
-                d2_optim.step()
-            
-            if args.augment and args.augment_p == 0:
-                ada_aug_p2 = ada_augment2.tune(rec_pred)
-
-        r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
-
-        # Train Encoder
-        joint = args.joint and g_scale > 1e-6
-        requires_grad(encoder, True)
-        requires_grad(generator, joint)
-        requires_grad(discriminator, False)
-        requires_grad(discriminator2, False)
-        if args.debug: util.seed_everything(i)
-        pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
-        for step_index in range(args.n_step_e):
-            real_img = real_imgs[step_index]
-            latent_real, _ = encoder(real_img)
-            rec_img, _ = generator([latent_real], input_is_latent=True)
-            if args.lambda_pix > 0:
-                if args.pix_loss == 'l2':
-                    pix_loss = torch.mean((rec_img - real_img) ** 2)
-                elif args.pix_loss == 'l1':
-                    pix_loss = F.l1_loss(rec_img, real_img)
-                else:
-                    raise NotImplementedError
-            if args.lambda_vgg > 0:
-                vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
-            if args.lambda_adv > 0:
-                if not args.decouple_d:
-                    if args.augment:
-                        rec_img_aug, _ = augment(rec_img, ada_aug_p)
-                    else:
-                        rec_img_aug = rec_img
-                    rec_pred = discriminator(rec_img_aug)
-                else:
-                    if args.augment:
-                        rec_img_aug, _ = augment(rec_img, ada_aug_p2)
-                    else:
-                        rec_img_aug = rec_img
-                    rec_pred = discriminator2(rec_img_aug)
-                adv_loss = g_nonsaturating_loss(rec_pred)
-            
-            if args.use_adaptive_weight and i >= args.disc_iter_start:
-                nll_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg
-                g_loss = adv_loss * args.lambda_adv
-                d_weight = calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
-
-            rec_w_loss = rec_fake_loss = 0
-            if args.lambda_rec_w > 0:
-                mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
-                noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
-                fake_img, latent_fake = generator(noise, return_latents=True)
-                if args.which_latent == 'w_tied':
-                    latent_fake = latent_fake[:,0,:]
-                else:
-                    latent_fake = latent_fake.view(args.batch, -1)
-                latent_pred, _ = encoder(fake_img)
-                rec_w_loss = torch.mean((latent_pred - latent_fake.detach()) ** 2)
-
-            ae_loss = (
-                pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + 
-                d_weight * adv_loss * args.lambda_adv + 
-                rec_w_loss * args.lambda_rec_w
-            )
-            loss_dict["ae"] = ae_loss
-            loss_dict["pix"] = pix_loss
-            loss_dict["vgg"] = vgg_loss
-            loss_dict["adv"] = adv_loss
-
-            if joint:
-                encoder.zero_grad()
-                generator.zero_grad()
-                ae_loss.backward()
-                e_optim.step()
-                if args.g_decay is not None:
-                    scale_grad(generator, g_scale)
-                    g_scale *= args.g_decay
-                g_optim.step()
-            else:
-                encoder.zero_grad()
-                ae_loss.backward()
-                e_optim.step()
 
         # Train Generator
         requires_grad(generator, True)
         requires_grad(encoder, False)
         requires_grad(discriminator, False)
         requires_grad(discriminator2, False)
-        if args.debug: util.seed_everything(i)
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
         fake_img, _ = generator(noise)
         if args.augment:
-            fake_img, _ = augment(fake_img, ada_aug_p)
-        fake_pred = discriminator(fake_img)
+            fake_img_aug, _ = augment(fake_img, ada_aug_p)
+        else:
+            fake_img_aug = fake_img
+        fake_pred = discriminator(encoder(fake_img_aug)[0])
         g_loss_fake = g_nonsaturating_loss(fake_pred)
         loss_dict["g"] = g_loss_fake
         generator.zero_grad()
@@ -488,6 +378,99 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
+        # Train Encoder (and Generator)
+        joint = (not args.no_joint) and (g_scale > 1e-6)
+
+        # Train AE on fake samples (latent reconstruction)
+        if args.lambda_rec_w > 0:
+            requires_grad(encoder, True)
+            requires_grad(generator, joint)
+            requires_grad(discriminator, False)
+            requires_grad(discriminator2, False)
+            for step_index in range(args.n_step_e):
+                mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
+                noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
+                fake_img, latent_fake = generator(noise, return_latents=True, detach_style=True)
+                if args.which_latent == 'w_tied':
+                    latent_fake = latent_fake[:,0,:]
+                else:
+                    latent_fake = latent_fake.view(args.batch, -1)
+                latent_pred, _ = encoder(fake_img)
+                ae_loss_fake = torch.mean((latent_pred - latent_fake.detach()) ** 2)
+                loss_dict["ae_fake"] = ae_loss_fake
+
+                if joint:
+                    encoder.zero_grad()
+                    generator.zero_grad()
+                    (ae_loss_fake * args.lambda_rec_w).backward()
+                    e_optim.step()
+                    if args.g_decay is not None:
+                        scale_grad(generator, g_scale)
+                    # Do NOT update F (or generator.style). Grad should be zero when
+                    # style detached in generator, but we explicitly zero it just in case.
+                    generator.style.zero_grad()
+                    g_optim.step()
+                else:
+                    encoder.zero_grad()
+                    (ae_loss_fake * args.lambda_rec_w).backward()
+                    e_optim.step()
+
+        # Train AE on real samples (image reconstruction)
+        if args.lambda_pix + args.lambda_vgg + args.lambda_adv > 0:
+            requires_grad(encoder, True)
+            requires_grad(generator, joint)
+            requires_grad(discriminator, False)
+            requires_grad(discriminator2, False)
+            pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
+            for step_index in range(args.n_step_e):
+                real_img = real_imgs[step_index]
+                latent_real, _ = encoder(real_img)
+                rec_img, _ = generator([latent_real], input_is_latent=True)
+                if args.lambda_pix > 0:
+                    if args.pix_loss == 'l2':
+                        pix_loss = torch.mean((rec_img - real_img) ** 2)
+                    elif args.pix_loss == 'l1':
+                        pix_loss = F.l1_loss(rec_img, real_img)
+                if args.lambda_vgg > 0:
+                    vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
+                if args.lambda_adv > 0:
+                    if args.augment:
+                        rec_img_aug, _ = augment(rec_img, ada_aug_p)
+                    else:
+                        rec_img_aug = rec_img
+                    rec_pred = discriminator(encoder(rec_img_aug)[0])
+                    adv_loss = g_nonsaturating_loss(rec_pred)
+
+                if args.use_adaptive_weight and i >= args.disc_iter_start:
+                    nll_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg
+                    g_loss = adv_loss * args.lambda_adv
+                    d_weight = calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
+
+                ae_loss_real = (
+                    pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + 
+                    d_weight * adv_loss * args.lambda_adv
+                )
+                loss_dict["ae_real"] = ae_loss_real
+                loss_dict["pix"] = pix_loss
+                loss_dict["vgg"] = vgg_loss
+                loss_dict["adv"] = adv_loss
+
+                if joint:
+                    encoder.zero_grad()
+                    generator.zero_grad()
+                    ae_loss_real.backward()
+                    e_optim.step()
+                    if args.g_decay is not None:
+                        scale_grad(generator, g_scale)
+                    g_optim.step()
+                else:
+                    encoder.zero_grad()
+                    ae_loss_real.backward()
+                    e_optim.step()
+
+        if args.g_decay is not None:
+            g_scale *= args.g_decay
+
         # Update EMA
         ema_nimg = args.ema_kimg * 1000
         if args.ema_rampup is not None:
@@ -499,7 +482,8 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         loss_reduced = reduce_loss_dict(loss_dict)
         d_loss_val = loss_reduced["d"].mean().item()
         g_loss_val = loss_reduced["g"].mean().item()
-        ae_loss_val = loss_reduced["ae"].mean().item()
+        ae_real_val = loss_reduced["ae_real"].mean().item()
+        ae_fake_val = loss_reduced["ae_fake"].mean().item()
         r1_val = loss_reduced["r1"].mean().item()
         path_loss_val = loss_reduced["path"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
@@ -508,18 +492,17 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         path_length_val = loss_reduced["path_length"].mean().item()
         pix_loss_val = loss_reduced["pix"].mean().item()
         vgg_loss_val = loss_reduced["vgg"].mean().item()
-        adv_loss_val = loss_reduced["adv"].mean().item()
         avg_pix_loss.update(pix_loss_val, real_img.shape[0])
         avg_vgg_loss.update(vgg_loss_val, real_img.shape[0])
 
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; ae: {ae_loss_val:.4f}; "
+                    f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; "
+                    f"ae_fake: {ae_fake_val:.4f}; ae_real: {ae_real_val:.4f}; "
                     f"g: {g_loss_val:.4f}; path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
                     f"augment: {ada_aug_p:.4f}; "
                     f"d_weight: {d_weight.item():.4f}; "
-                    # f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}"
                 )
             )
 
@@ -556,20 +539,18 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         normalize=True,
                         range=(-1, 1),
                     )
-                    # gz_pix_loss = torch.sum(torch.abs(sample_gz - rec_fake))
-                    # gz_vgg_loss = torch.mean((vggnet(sample_gz) - vggnet(rec_fake)) ** 2) if vggnet is not None else 0
 
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(
                         (
                             f"{i:07d}; "
-                            f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; ae: {ae_loss_val:.4f}; "
+                            f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; "
+                            f"ae_fake: {ae_fake_val:.4f}; ae_real: {ae_real_val:.4f}; "
                             f"g: {g_loss_val:.4f}; path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
                             f"augment: {ada_aug_p:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
                             f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f}; "
                             f"pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; "
                             f"ref_pix: {ref_pix_loss.item():.4f}; ref_vgg: {ref_vgg_loss.item():.4f}; "
-                            # f"gz_pix: {gz_pix_loss.item():.4f}; gz_vgg: {gz_vgg_loss.item():.4f}; "
                             f"d_weight: {d_weight.item():.4f}; "
                             f"\n"
                         )
@@ -642,7 +623,6 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         "d2_optim": d2_optim.state_dict() if args.decouple_d else None,
                         "args": args,
                         "ada_aug_p": ada_aug_p,
-                        "ada_aug_p2": ada_aug_p2,
                         "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
@@ -663,7 +643,6 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         "d2_optim": d2_optim.state_dict() if args.decouple_d else None,
                         "args": args,
                         "ada_aug_p": ada_aug_p,
-                        "ada_aug_p2": ada_aug_p2,
                         "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"latest.pt"),
@@ -779,26 +758,26 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--which_encoder", type=str, default='style')
-    parser.add_argument("--which_latent", type=str, default='w_plus')
+    parser.add_argument("--which_latent", type=str, default='w_tied')
     parser.add_argument("--stddev_group", type=int, default=1)
     parser.add_argument("--use_wscale", action='store_true', help="whether to use `wscale` layer in idinvert encoder")
     parser.add_argument("--vgg_ckpt", type=str, default="vgg16.pth")
     parser.add_argument("--output_layer_idx", type=int, default=23)
-    parser.add_argument("--lambda_vgg", type=float, default=5e-5)
-    parser.add_argument("--lambda_adv", type=float, default=0.1)
-    parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
+    parser.add_argument("--lambda_vgg", type=float, default=0)
+    parser.add_argument("--lambda_adv", type=float, default=0)
+    parser.add_argument("--lambda_pix", type=float, default=0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_fake_d", type=float, default=1.0)
-    parser.add_argument("--lambda_rec_d", type=float, default=1.0, help="d1, recon of real image")
+    parser.add_argument("--lambda_rec_d", type=float, default=0, help="d1, recon of real image")
     parser.add_argument("--lambda_fake_g", type=float, default=1.0)
-    parser.add_argument("--lambda_rec_w", type=float, default=0, help="recon sampled w")
+    parser.add_argument("--lambda_rec_w", type=float, default=1, help="recon sampled w")
     parser.add_argument("--pix_loss", type=str, default='l2')
-    parser.add_argument("--joint", action='store_true', help="update generator with encoder")
+    parser.add_argument("--no_joint", action='store_true', help="do not update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
     parser.add_argument("--n_sample_fid", type=int, default=50000, help="number of the samples for calculating FID")
     parser.add_argument("--nframe_num", type=int, default=5)
-    parser.add_argument("--decouple_d", action='store_true')
+    parser.add_argument("--decouple_d", action='store_true', help="separate discriminator in ALAE")
     parser.add_argument("--n_step_d", type=int, default=1)
     parser.add_argument("--n_step_e", type=int, default=1)
     parser.add_argument("--resume", action='store_true')
@@ -810,15 +789,19 @@ if __name__ == "__main__":
     parser.add_argument("--limit_train_batches", type=float, default=1)
     parser.add_argument("--g_decay", type=float, default=None, help="g decay factor")
     parser.add_argument("--n_mlp_g", type=int, default=8)
+    parser.add_argument("--n_mlp_d", type=int, default=3)
+    parser.add_argument("--lr_mlp_g", type=float, default=0.01)
+    parser.add_argument("--lr_mlp_d", type=float, default=0.1)
     parser.add_argument("--ema_kimg", type=int, default=10, help="Half-life of the exponential moving average (EMA) of generator weights.")
     parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
     parser.add_argument("--no_ema_e", action='store_true')
     parser.add_argument("--no_ema_g", action='store_true')
-    parser.add_argument("--which_metric", type=str, nargs='*', default=['fid_sample', 'fid_sample_recon', 'fid_recon'])
+    parser.add_argument("--which_metric", type=str, nargs='*', default=['fid_sample'])
     parser.add_argument("--use_adaptive_weight", action='store_true', help="adaptive weight borrowed from VQGAN")
     parser.add_argument("--disc_iter_start", type=int, default=30000)
+    parser.add_argument("--use_pixelnorm", action='store_true')
     parser.add_argument("--which_phi_e", type=str, default='lin2')
-    parser.add_argument("--which_phi_d", type=str, default='lin2')
+    parser.add_argument("--which_phi_d", type=str, default='lin2', help="which_phi of d2, if decouple_d")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -832,7 +815,6 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
         synchronize()
 
-    # args.n_mlp = 8
     args.n_latent = int(np.log2(args.size)) * 2 - 2
     args.latent = 512
     if args.which_latent == 'w_plus':
@@ -842,27 +824,26 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
 
-    assert((not args.use_adaptive_weight) or args.joint)
+    assert((not args.use_adaptive_weight) or (not args.no_joint))
 
     args.start_iter = 0
     args.iter += 1
     util.set_log_dir(args)
     util.print_args(parser, args)
 
-    if args.arch == 'stylegan2':
-        from model import Generator, Discriminator
-
-    elif args.arch == 'swagan':
-        from swagan import Generator, Discriminator
+    from model import Generator, LatentDiscriminator
 
     generator = Generator(
-        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier
+        args.size, args.latent, args.n_mlp_g, lr_mlp=args.lr_mlp_g,
+        channel_multiplier=args.channel_multiplier,
     ).to(device)
-    discriminator = Discriminator(
-        args.size, channel_multiplier=args.channel_multiplier, which_phi=args.which_phi_d
+    discriminator = LatentDiscriminator(
+        latent_dim=args.latent_full, n_mlp=args.n_mlp_d, lr_mlp=args.lr_mlp_d,
+        hidden_dim=512, use_pixelnorm=args.use_pixelnorm,
     ).to(device)
     g_ema = Generator(
-        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier
+        args.size, args.latent, args.n_mlp_g, lr_mlp=args.lr_mlp_g,
+        channel_multiplier=args.channel_multiplier,
     ).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)
@@ -883,6 +864,7 @@ if __name__ == "__main__":
 
     discriminator2 = d2_optim = None
     if args.decouple_d:
+        from model import Discriminator
         discriminator2 = Discriminator(
             args.size, channel_multiplier=args.channel_multiplier, which_phi=args.which_phi_d
         ).to(device)
@@ -893,13 +875,7 @@ if __name__ == "__main__":
         )
 
     # Define Encoder
-    if args.which_encoder == 'idinvert':
-        from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
-        encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
-        e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
-    else:
+    if args.which_encoder == 'style':
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
             which_latent=args.which_latent, which_phi=args.which_phi_e,

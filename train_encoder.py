@@ -214,7 +214,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
     if sample_x.ndim > 4:
         sample_x = sample_x[:,0,...]
     
-    input_is_latent = args.p_space != 'z'  # Encode in z space?
+    input_is_latent = args.latent_space != 'z'  # Encode in z space?
 
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
@@ -613,7 +613,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
     parser.add_argument("--n_sample_fid", type=int, default=10000, help="number of the samples for calculating FID")
-    parser.add_argument("--p_space", type=str, default='none', help="P-Space (w | p | pn | z)")
+    parser.add_argument("--latent_space", type=str, default='w', help="latent space (w | p | pn | z)")
     parser.add_argument("--ema_kimg", type=int, default=10, help="Half-life of the exponential moving average (EMA) of generator weights.")
     parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
     parser.add_argument("--n_mlp_g", type=int, default=8)
@@ -697,11 +697,11 @@ if __name__ == "__main__":
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
             which_latent=args.which_latent, reshape_latent=False, stddev_group=args.stddev_group,
-            p_space=args.p_space, pca_state=pca_state).to(device)
+            latent_space=args.latent_space, pca_state=pca_state).to(device)
         if not args.no_ema:
             e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
                 which_latent=args.which_latent, reshape_latent=False, stddev_group=args.stddev_group,
-                p_space=args.p_space, pca_state=pca_state).to(device)
+                latent_space=args.latent_space, pca_state=pca_state).to(device)
     if not args.no_ema:
         e_ema.eval()
         accumulate(e_ema, encoder, 0)

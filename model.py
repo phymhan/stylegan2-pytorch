@@ -851,7 +851,7 @@ class Encoder(nn.Module):
         stddev_feat=1,
         reparameterization=False,
         return_tuple=True,  # backward compatibility
-        p_space='w',
+        latent_space='w',
         pca_state=None,
     ):
         """
@@ -889,9 +889,9 @@ class Encoder(nn.Module):
             raise NotImplementedError
         self.reparameterization = reparameterization
         self.return_tuple = return_tuple
-        self.p_space = p_space
+        self.latent_space = latent_space
         self.register_buffer('pca_state', pca_state)
-        assert((p_space in ['none', 'w', 'p', 'z']) or (pca_state is not None))
+        assert((latent_space in ['w', 'p', 'pn', 'z']) or (pca_state is not None))
 
         in_channel = channels[size]
 
@@ -933,13 +933,13 @@ class Encoder(nn.Module):
         else:
             raise NotImplementedError
 
-    def latent_forward(self, style, p_space, pca_state=None):
-        if p_space in ['w', 'none', 'z']:  # style is in W
+    def latent_forward(self, style, latent_space, pca_state=None):
+        if latent_space in ['w', 'z']:  # style is in W
             return style
-        elif p_space in ['p']:  # style is in P
+        elif latent_space in ['p']:  # style is in P
             style = F.leaky_relu(style, 0.2)
             return style
-        elif p_space in ['pn']:  # style is in PN
+        elif latent_space in ['pn']:  # style is in PN
             if style.shape[1] > self.style_dim:
                 p = torch.cat([torch.matmul(w * pca_state['Lambda'], pca_state['CT']) + pca_state['mu']
                         for w in torch.split(style, self.style_dim, 1)], 1)
@@ -969,7 +969,7 @@ class Encoder(nn.Module):
         if self.reparameterization:
             return out.chunk(2, dim=1)
 
-        out = self.latent_forward(out, self.p_space, self.pca_state)
+        out = self.latent_forward(out, self.latent_space, self.pca_state)
 
         if self.return_tuple:
             return out, None

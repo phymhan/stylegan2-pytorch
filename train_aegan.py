@@ -259,7 +259,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     if sample_x.ndim > 4:
         sample_x = sample_x[:,0,...]
 
-    input_is_latent = args.p_space != 'z'  # Encode in z space?
+    input_is_latent = args.latent_space != 'z'  # Encode in z space?
 
     n_step_max = max(args.n_step_d, args.n_step_e)
 
@@ -821,7 +821,7 @@ if __name__ == "__main__":
     parser.add_argument("--disc_iter_start", type=int, default=30000)
     parser.add_argument("--which_phi_e", type=str, default='lin2')
     parser.add_argument("--which_phi_d", type=str, default='lin2')
-    parser.add_argument("--p_space", type=str, default='w', help="latent space (w | p | pn | z)")
+    parser.add_argument("--latent_space", type=str, default='w', help="latent space (w | p | pn | z)")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -846,7 +846,7 @@ if __name__ == "__main__":
         raise NotImplementedError
 
     assert((not args.use_adaptive_weight) or args.joint)
-    assert(args.p_space in ['w', 'z'])
+    assert(args.latent_space in ['w', 'z'])
 
     args.start_iter = 0
     args.iter += 1

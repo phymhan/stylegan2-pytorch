@@ -260,6 +260,8 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
     sample_x = load_real_samples(args, loader)
     if sample_x.ndim > 4:
         sample_x = sample_x[:,0,...]
+    
+    input_is_latent = args.p_space != 'z'  # Encode in z space?
 
     n_step_max = max(args.n_step_d, args.n_step_e)
 
@@ -301,7 +303,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             d_loss_rec = 0.
             if args.lambda_rec_d > 0:
                 latent_real, _ = encoder(real_img)
-                rec_img, _ = generator([latent_real], input_is_latent=True)
+                rec_img, _ = generator([latent_real], input_is_latent=input_is_latent)
                 if args.augment:
                     rec_img, _ = augment(rec_img, ada_aug_p)
                 rec_pred = discriminator(encoder(rec_img)[0])
@@ -324,7 +326,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         r_t_dict['real'] = torch.sign(real_pred).sum().item() / args.batch
         r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
 
-        d_regularize = i % args.d_reg_every == 0
+        d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
         if d_regularize:
             real_img.requires_grad = True
             if args.augment:
@@ -390,7 +392,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             for step_index in range(args.n_step_e):
                 mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
                 noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
-                fake_img, latent_fake = generator(noise, return_latents=True, detach_style=True)
+                fake_img, latent_fake = generator(noise, return_latents=True, detach_style=not args.no_detach_style)
                 if args.which_latent == 'w_tied':
                     latent_fake = latent_fake[:,0,:]
                 else:
@@ -406,9 +408,10 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     e_optim.step()
                     if args.g_decay is not None:
                         scale_grad(generator, g_scale)
-                    # Do NOT update F (or generator.style). Grad should be zero when
-                    # style detached in generator, but we explicitly zero it just in case.
-                    generator.style.zero_grad()
+                    # Do NOT update F (or generator.style). Grad should be zero when style 
+                    # is detached in generator, but we explicitly zero it, just in case.
+                    if not args.no_detach_style:
+                        generator.style.zero_grad()
                     g_optim.step()
                 else:
                     encoder.zero_grad()
@@ -425,7 +428,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             for step_index in range(args.n_step_e):
                 real_img = real_imgs[step_index]
                 latent_real, _ = encoder(real_img)
-                rec_img, _ = generator([latent_real], input_is_latent=True)
+                rec_img, _ = generator([latent_real], input_is_latent=input_is_latent)
                 if args.lambda_pix > 0:
                     if args.pix_loss == 'l2':
                         pix_loss = torch.mean((rec_img - real_img) ** 2)
@@ -514,7 +517,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     nchw = list(sample_x.shape)[1:]
                     # Reconstruction of real images
                     latent_x, _ = e_ema(sample_x)
-                    rec_real, _ = g_ema([latent_x], input_is_latent=True)
+                    rec_real, _ = g_ema([latent_x], input_is_latent=input_is_latent)
                     sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         rec_real.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
                     utils.save_image(
@@ -529,7 +532,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     # Fixed fake samples and reconstructions
                     sample_gz, _ = g_ema([sample_z])
                     latent_gz, _ = e_ema(sample_gz)
-                    rec_fake, _ = g_ema([latent_gz], input_is_latent=True)
+                    rec_fake, _ = g_ema([latent_gz], input_is_latent=input_is_latent)
                     sample = torch.cat((sample_gz.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         rec_fake.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
                     utils.save_image(
@@ -591,7 +594,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     if 'fid_sample_recon' in args.which_metric:
                         features = extract_feature_from_samples(
                             g_ema, inception, args.truncation, mean_latent, 64, args.n_sample_fid, args.device,
-                            mode='recon', encoder=e_ema,
+                            mode='recon', encoder=e_ema, input_is_latent=input_is_latent,
                         ).numpy()
                         sample_mean = np.mean(features, 0)
                         sample_cov = np.cov(features, rowvar=False)
@@ -600,7 +603,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                     if 'fid_recon' in args.which_metric:
                         features = extract_feature_from_reconstruction(
                             e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                            mode='recon',
+                            input_is_latent=input_is_latent, mode='recon',
                         ).numpy()
                         sample_mean = np.mean(features, 0)
                         sample_cov = np.cov(features, rowvar=False)
@@ -800,8 +803,10 @@ if __name__ == "__main__":
     parser.add_argument("--use_adaptive_weight", action='store_true', help="adaptive weight borrowed from VQGAN")
     parser.add_argument("--disc_iter_start", type=int, default=30000)
     parser.add_argument("--use_pixelnorm", action='store_true')
+    parser.add_argument("--no_detach_style", action='store_true')
     parser.add_argument("--which_phi_e", type=str, default='lin2')
     parser.add_argument("--which_phi_d", type=str, default='lin2', help="which_phi of d2, if decouple_d")
+    parser.add_argument("--p_space", type=str, default='w', help="latent space (w | p | pn | z)")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -824,7 +829,11 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
 
-    assert((not args.use_adaptive_weight) or (not args.no_joint))
+    assert(
+        (not args.use_adaptive_weight) or 
+        (not args.no_joint and args.lambda_adv > 0 and args.lambda_pix + args.lambda_vgg > 0)
+    )
+    assert(args.p_space in ['w', 'z'])
 
     args.start_iter = 0
     args.iter += 1

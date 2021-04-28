@@ -214,7 +214,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
     if sample_x.ndim > 4:
         sample_x = sample_x[:,0,...]
     
-    encode_z = args.p_space == 'z'  # Encode in z space?
+    input_is_latent = args.p_space != 'z'  # Encode in z space?
 
     requires_grad(generator, False)  # always False
     generator.eval()  # Generator should be ema and in eval mode
@@ -239,7 +239,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             requires_grad(discriminator, False)
         pix_loss = vgg_loss = adv_loss = rec_loss = torch.tensor(0., device=device)
         latent_real, _ = encoder(real_img)
-        fake_img, _ = generator([latent_real], input_is_latent=not encode_z)
+        fake_img, _ = generator([latent_real], input_is_latent=input_is_latent)
 
         if args.lambda_adv > 0:
             if args.augment:
@@ -275,7 +275,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             e_regularize = args.e_rec_every > 0 and i % args.e_rec_every == 0
             if e_regularize and args.lambda_rec > 0:
                 noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                fake_img, latent_fake = generator(noise, input_is_latent=not encode_z, return_latents=True)
+                fake_img, latent_fake = generator(noise, input_is_latent=input_is_latent, return_latents=True)
                 latent_pred, _ = encoder(fake_img)
                 if latent_pred.ndim < 3:
                     latent_pred = latent_pred.unsqueeze(1).repeat(1, latent_fake.size(1), 1)
@@ -311,7 +311,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             requires_grad(discriminator, True)
         if not args.no_update_discriminator and args.lambda_adv > 0:
             latent_real, _ = encoder(real_img)
-            fake_img, _ = generator([latent_real], input_is_latent=not encode_z)
+            fake_img, _ = generator([latent_real], input_is_latent=input_is_latent)
 
             if args.augment:
                 real_img_aug, _ = augment(real_img, ada_aug_p)
@@ -377,7 +377,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
             if i % args.log_every == 0:
                 with torch.no_grad():
                     latent_x, _ = e_ema(sample_x)
-                    fake_x, _ = generator([latent_x], input_is_latent=not encode_z)
+                    fake_x, _ = g_ema([latent_x], input_is_latent=input_is_latent)
                     sample_pix_loss = torch.sum((sample_x - fake_x) ** 2)
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                     f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
@@ -390,7 +390,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
                     # Recon
                     features = extract_feature_from_reconstruction(
                         e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        encode_z=encode_z, mode='recon',
+                        input_is_latent=input_is_latent, mode='recon',
                     ).numpy()
                     sample_mean = np.mean(features, 0)
                     sample_cov = np.cov(features, rowvar=False)
@@ -424,7 +424,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
                     nrow = int(args.n_sample ** 0.5)
                     nchw = list(sample_x.shape)[1:]
                     latent_real, _ = e_eval(sample_x)
-                    fake_img, _ = generator([latent_real], input_is_latent=not encode_z)
+                    fake_img, _ = generator([latent_real], input_is_latent=input_is_latent)
                     sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
                                         fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
                     utils.save_image(

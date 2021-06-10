@@ -432,7 +432,7 @@ def train(args, loader, loader2, encoder, generator, discriminator, vggnet, pwcn
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     e_eval.train()
 

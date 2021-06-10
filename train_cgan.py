@@ -364,7 +364,7 @@ def train(args, loader, generator, discriminator, g_optim, d_optim, g_ema, devic
                             os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}_{sheet_index}.png"),
                             nrow=args.n_sample_per_class,
                             normalize=True,
-                            range=(-1, 1),
+                            value_range=(-1, 1),
                         )
             
             if args.eval_every > 0 and i % args.eval_every == 0:

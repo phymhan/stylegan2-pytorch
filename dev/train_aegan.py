@@ -589,7 +589,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=int(args.n_sample ** 0.5),
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # Reconstruction samples
                     latent_real, _ = e_ema(sample_x)
@@ -601,7 +601,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # Hybrid samples: [real_y1, real_y2; real_x1, fake_x2]
                     if args.eval_hybrid:
@@ -624,7 +624,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                             os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
                             nrow=2*nrow,
                             normalize=True,
-                            range=(-1, 1),
+                            value_range=(-1, 1),
                         )
 
             if i % args.save_every == 0:

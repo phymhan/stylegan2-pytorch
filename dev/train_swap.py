@@ -303,7 +303,7 @@ def train(args, loader, loader2, T_list,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # Cross
                     w1, _ = e_eval(sample_x1)
@@ -330,7 +330,7 @@ def train(args, loader, loader2, T_list,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
                         nrow=2*nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # Sample
                     sample, _ = g_ema([sample_z])
@@ -339,7 +339,7 @@ def train(args, loader, loader2, T_list,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # Fake hybrid samples
                     w1, _ = e_eval(sample_x1)
@@ -366,7 +366,7 @@ def train(args, loader, loader2, T_list,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample_hybrid.png"),
                         nrow=2*nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                 e_eval.train()
 
@@ -1144,7 +1144,8 @@ if __name__ == "__main__":
                 output_device=args.local_rank,
                 broadcast_buffers=False,
             )
-    T_list = util.get_nframe_num(args)
+    # T_list = util.get_nframe_num(args)
+    T_list = util.linspace(args.nframe_iter_range, args.nframe_num_range, args.iter, args.nframe_num)
     dataset = None
     if args.dataset == 'multires':
         # TODO: force G(w+Dy) to be real

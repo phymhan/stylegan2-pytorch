@@ -417,11 +417,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 g_loss = adv_loss * args.lambda_adv
                 d_weight = calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
 
-            rec_w_loss = rec_fake_loss = 0
+            rec_w_loss = 0
             if args.lambda_rec_w > 0:
                 mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
                 noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
-                fake_img, latent_fake = generator(noise, return_latents=True)
+                fake_img, latent_fake = generator(noise, return_latents=True, detach_style=True)
                 if args.which_latent == 'w_tied':
                     latent_fake = latent_fake[:,0,:]
                 else:
@@ -490,6 +490,25 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
+        # Train Encoder
+        if args.lambda_rec_w_extra > 0:
+            requires_grad(encoder, True)
+            requires_grad(generator, False)
+            requires_grad(discriminator, False)
+            requires_grad(discriminator2, False)
+            mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
+            noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
+            fake_img, latent_fake = generator(noise, return_latents=True)
+            if args.which_latent == 'w_tied':
+                latent_fake = latent_fake[:,0,:]
+            else:
+                latent_fake = latent_fake.view(args.batch, -1)
+            latent_pred, _ = encoder(fake_img)
+            rec_w_loss_extra = torch.mean((latent_pred - latent_fake.detach()) ** 2)
+            encoder.zero_grad()
+            (rec_w_loss_extra * args.lambda_rec_w_extra).backward()
+            e_optim.step()
+
         # Update EMA
         ema_nimg = args.ema_kimg * 1000
         if args.ema_rampup is not None:
@@ -541,7 +560,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     ref_pix_loss = torch.sum(torch.abs(sample_x - rec_real))
                     ref_vgg_loss = torch.mean((vggnet(sample_x) - vggnet(rec_real)) ** 2) if vggnet is not None else 0
@@ -556,7 +575,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # gz_pix_loss = torch.sum(torch.abs(sample_gz - rec_fake))
                     # gz_vgg_loss = torch.mean((vggnet(sample_gz) - vggnet(rec_fake)) ** 2) if vggnet is not None else 0
@@ -822,6 +841,7 @@ if __name__ == "__main__":
     parser.add_argument("--which_phi_e", type=str, default='lin2')
     parser.add_argument("--which_phi_d", type=str, default='lin2')
     parser.add_argument("--latent_space", type=str, default='w', help="latent space (w | p | pn | z)")
+    parser.add_argument("--lambda_rec_w_extra", type=float, default=0, help="recon sampled w")
 
     args = parser.parse_args()
     util.seed_everything()

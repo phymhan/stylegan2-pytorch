@@ -286,7 +286,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # Cross
                     w1, _ = e_eval(sample_x1)
@@ -301,7 +301,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     # Sample
                     sample, _ = g_ema([sample_z])
@@ -310,7 +310,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_w,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                 e_eval.train()
 

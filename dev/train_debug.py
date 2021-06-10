@@ -365,7 +365,7 @@ def train(
         os.path.join(args.log_dir, 'sample', f"real-img.png"),
         nrow=sample_x.shape[1],
         normalize=True,
-        range=(-1, 1),
+        value_range=(-1, 1),
     )
     util.save_video(
         sample_x[0],
@@ -694,7 +694,7 @@ def train(
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-img_recon.png"),
                         nrow=T,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     util.save_video(
                         fake_seq[random.randint(0, args.n_sample-1)],
@@ -706,7 +706,7 @@ def train(
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-img_swap.png"),
                         nrow=T,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     e_eval.train()
                     posterior.train()

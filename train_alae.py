@@ -384,21 +384,54 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
         joint = (not args.no_joint) and (g_scale > 1e-6)
 
         # Train AE on fake samples (latent reconstruction)
-        if args.lambda_rec_w > 0:
+        if args.lambda_rec_w + (args.lambda_pix_fake + args.lambda_vgg_fake + args.lambda_adv_fake) > 0:
             requires_grad(encoder, True)
             requires_grad(generator, joint)
             requires_grad(discriminator, False)
             requires_grad(discriminator2, False)
             for step_index in range(args.n_step_e):
+                # mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
+                # noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
+                # fake_img, latent_fake = generator(noise, return_latents=True, detach_style=not args.no_detach_style)
+                # if args.which_latent == 'w_tied':
+                #     latent_fake = latent_fake[:,0,:]
+                # else:
+                #     latent_fake = latent_fake.view(args.batch, -1)
+                # latent_pred, _ = encoder(fake_img)
+                # ae_loss_fake = torch.mean((latent_pred - latent_fake.detach()) ** 2)
+
+                ae_loss_fake = 0
                 mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
-                noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
-                fake_img, latent_fake = generator(noise, return_latents=True, detach_style=not args.no_detach_style)
-                if args.which_latent == 'w_tied':
-                    latent_fake = latent_fake[:,0,:]
-                else:
-                    latent_fake = latent_fake.view(args.batch, -1)
-                latent_pred, _ = encoder(fake_img)
-                ae_loss_fake = torch.mean((latent_pred - latent_fake.detach()) ** 2)
+                if args.lambda_rec_w > 0:
+                    noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
+                    fake_img, latent_fake = generator(noise, return_latents=True, detach_style=not args.no_detach_style)
+                    if args.which_latent == 'w_tied':
+                        latent_fake = latent_fake[:,0,:]
+                    else:
+                        latent_fake = latent_fake.view(args.batch, -1)
+                    latent_pred, _ = encoder(fake_img)
+                    ae_loss_fake = torch.mean((latent_pred - latent_fake.detach()) ** 2)
+
+                if args.lambda_pix_fake + args.lambda_vgg_fake + args.lambda_adv_fake > 0:
+                    pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
+                    noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
+                    fake_img, _ = generator(noise, detach_style=False)
+                    fake_img = fake_img.detach()
+
+                    latent_pred, _ = encoder(fake_img)
+                    rec_img, _ = generator([latent_pred], input_is_latent=input_is_latent)
+                    if args.lambda_pix_fake > 0:
+                        if args.pix_loss == 'l2':
+                            pix_loss = torch.mean((rec_img - fake_img) ** 2)
+                        elif args.pix_loss == 'l1':
+                            pix_loss = F.l1_loss(rec_img, fake_img)
+                    if args.lambda_vgg_fake > 0:
+                        vgg_loss = torch.mean((vggnet(fake_img) - vggnet(rec_img)) ** 2)
+
+                    ae_loss_fake = (ae_loss_fake + 
+                        pix_loss * args.lambda_pix_fake + vgg_loss * args.lambda_vgg_fake
+                    )
+
                 loss_dict["ae_fake"] = ae_loss_fake
 
                 if joint:
@@ -525,7 +558,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     ref_pix_loss = torch.sum(torch.abs(sample_x - rec_real))
                     ref_vgg_loss = torch.mean((vggnet(sample_x) - vggnet(rec_real)) ** 2) if vggnet is not None else 0
@@ -540,7 +573,7 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
 
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
@@ -807,6 +840,9 @@ if __name__ == "__main__":
     parser.add_argument("--which_phi_e", type=str, default='lin2')
     parser.add_argument("--which_phi_d", type=str, default='lin2', help="which_phi of d2, if decouple_d")
     parser.add_argument("--latent_space", type=str, default='w', help="latent space (w | p | pn | z)")
+    parser.add_argument("--lambda_pix_fake", type=float, default=0, help="recon fake image G(F(z))")
+    parser.add_argument("--lambda_vgg_fake", type=float, default=0, help="recon fake image G(F(z))")
+    parser.add_argument("--lambda_adv_fake", type=float, default=0, help="recon fake image G(F(z))")
 
     args = parser.parse_args()
     util.seed_everything()

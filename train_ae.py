@@ -398,7 +398,7 @@ def train(args, loader, loader2, generator, encoder, discriminator,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     ref_pix_loss = torch.sum(torch.abs(sample_x - rec_real))
                     ref_vgg_loss = torch.mean((vggnet(sample_x) - vggnet(rec_real)) ** 2) if vggnet is not None else 0
@@ -409,7 +409,7 @@ def train(args, loader, loader2, generator, encoder, discriminator,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
                         nrow=int(args.n_sample ** 0.5),
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
 
                 with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:

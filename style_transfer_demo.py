@@ -139,12 +139,12 @@ def run(args, loader, encoder, generator, device):
 
         # save images and videos
         T = seqA.shape[0]
-        utils.save_image(oriA, os.path.join(args.output_dir, f'{counter:03d}-img_origA.png'), nrow=T-1, normalize=True, range=(-1, 1))
-        utils.save_image(oriB, os.path.join(args.output_dir, f'{counter:03d}-img_origB.png'), nrow=T-1, normalize=True, range=(-1, 1))
-        utils.save_image(recA, os.path.join(args.output_dir, f'{counter:03d}-img_reconA.png'), nrow=T-1, normalize=True, range=(-1, 1))
-        utils.save_image(recB, os.path.join(args.output_dir, f'{counter:03d}-img_reconB.png'), nrow=T-1, normalize=True, range=(-1, 1))
-        utils.save_image(coAmoB, os.path.join(args.output_dir, f'{counter:03d}-img_coA+moB.png'), nrow=T-1, normalize=True, range=(-1, 1))
-        utils.save_image(coBmoA, os.path.join(args.output_dir, f'{counter:03d}-img_coB+moA.png'), nrow=T-1, normalize=True, range=(-1, 1))
+        utils.save_image(oriA, os.path.join(args.output_dir, f'{counter:03d}-img_origA.png'), nrow=T-1, normalize=True, value_range=(-1, 1))
+        utils.save_image(oriB, os.path.join(args.output_dir, f'{counter:03d}-img_origB.png'), nrow=T-1, normalize=True, value_range=(-1, 1))
+        utils.save_image(recA, os.path.join(args.output_dir, f'{counter:03d}-img_reconA.png'), nrow=T-1, normalize=True, value_range=(-1, 1))
+        utils.save_image(recB, os.path.join(args.output_dir, f'{counter:03d}-img_reconB.png'), nrow=T-1, normalize=True, value_range=(-1, 1))
+        utils.save_image(coAmoB, os.path.join(args.output_dir, f'{counter:03d}-img_coA+moB.png'), nrow=T-1, normalize=True, value_range=(-1, 1))
+        utils.save_image(coBmoA, os.path.join(args.output_dir, f'{counter:03d}-img_coB+moA.png'), nrow=T-1, normalize=True, value_range=(-1, 1))
         util.save_video(oriA, os.path.join(args.output_dir, f'{counter:03d}-vid_origA.mp4'))
         util.save_video(oriB, os.path.join(args.output_dir, f'{counter:03d}-vid_origB.mp4'))
         util.save_video(recA, os.path.join(args.output_dir, f'{counter:03d}-vid_reconA.mp4'))

@@ -14,7 +14,7 @@ from PIL import Image
 from tqdm import tqdm
 import util
 from calc_inception import load_patched_inception_v3
-from fid import extract_feature_from_samples, calc_fid, extract_feature_from_recon_hybrid
+from fid import extract_feature_from_samples, calc_fid, extract_feature_from_reconstruction
 import pickle
 import pdb
 st = pdb.set_trace
@@ -25,8 +25,7 @@ try:
 except ImportError:
     wandb = None
 
-from model import Generator, Discriminator
-from dataset import MultiResolutionDataset, VideoFolderDataset
+from dataset import get_image_dataset
 from distributed import (
     get_rank,
     synchronize,
@@ -34,7 +33,15 @@ from distributed import (
     reduce_sum,
     get_world_size,
 )
+from op import conv2d_gradfix
 from non_leaking import augment, AdaptiveAugment
+
+
+def scale_grad(model, scale):
+    if model is not None:
+        for p in model.parameters():
+            if p.grad is not None:
+                p.grad *= scale
 
 
 def data_sampler(dataset, shuffle, distributed):
@@ -63,17 +70,13 @@ def accumulate(model1, model2, decay=0.999):
 
 
 def sample_data(loader):
-    # Endless iterator
+    # Endless image iterator
     while True:
         for batch in loader:
-            yield batch
-
-
-def sample_data2(loader):
-    # image and label pair
-    while True:
-        for batch, _ in loader:
-            yield batch
+            if isinstance(batch, (list, tuple)):
+                yield batch[0]
+            else:
+                yield batch
 
 
 def d_logistic_loss(real_pred, fake_pred):
@@ -84,9 +87,10 @@ def d_logistic_loss(real_pred, fake_pred):
 
 
 def d_r1_loss(real_pred, real_img):
-    grad_real, = autograd.grad(
-        outputs=real_pred.sum(), inputs=real_img, create_graph=True
-    )
+    with conv2d_gradfix.no_weight_gradients():
+        grad_real, = autograd.grad(
+            outputs=real_pred.sum(), inputs=real_img, create_graph=True
+        )
     grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
 
     return grad_penalty
@@ -112,6 +116,22 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
     path_penalty = (path_lengths - path_mean).pow(2).mean()
 
     return path_penalty, path_mean.detach(), path_lengths
+
+
+def calculate_adaptive_weight(nll_loss, g_loss, last_layer=None):
+    if last_layer is None:
+        return 1.0
+    nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)
+    g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)
+    if isinstance(last_layer, (list, tuple)):
+        nll_grads = torch.cat([v.view(-1) for v in nll_grads])
+        g_grads = torch.cat([v.view(-1) for v in g_grads])
+    else:
+        nll_grads = nll_grads[0]
+        g_grads = g_grads[0]
+    d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
+    d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
+    return d_weight
 
 
 def make_noise(batch, latent_dim, n_noise, device):
@@ -141,6 +161,8 @@ def accumulate_batches(data_iter, num):
     samples = []
     while num > 0:
         imgs = next(data_iter)
+        if isinstance(imgs, (list, tuple)):
+            imgs = imgs[0]
         samples.append(imgs)
         num -= imgs.size(0)
     samples = torch.cat(samples, dim=0)
@@ -151,43 +173,17 @@ def accumulate_batches(data_iter, num):
 
 def load_real_samples(args, data_iter):
     npy_path = args.sample_cache
-    # load sample_x
     if npy_path is not None and os.path.exists(npy_path):
         sample_x = torch.from_numpy(np.load(npy_path)).to(args.device)
     else:
         sample_x = accumulate_batches(data_iter, args.n_sample).to(args.device)
         if npy_path is not None:
             np.save(npy_path, sample_x.cpu().numpy())
-    # load indice
-    idx_path = None if npy_path is None else npy_path.replace('.npy', '_idx.npy')
-    if idx_path is not None and os.path.exists(idx_path):
-        sample_idx = torch.from_numpy(np.load(idx_path))
-    else:
-        sample_idx = torch.randperm(args.n_sample)
-        if idx_path is not None:
-            np.save(idx_path, sample_idx.numpy())
-    return sample_x, sample_idx
+    return sample_x
 
 
-def get_batch(loader, device, T=0, rand=True):
-    frames = next(loader)  # [N, T, C, H, W]
-    batch = frames.shape[0]
-    if T <= 0:
-        T = frames.shape[1]
-    frames1 = frames[:,0,...]
-    if rand:
-        frames2 = frames[range(batch),torch.randint(1,T,(batch,)),...]
-    else:
-        frames2 = frames[:,T-1,...]
-    frames1 = frames1.to(device)
-    frames2 = frames2.to(device)
-    return frames1, frames2
-
-
-def train(args, loader, loader2, T_list,
-          generator, encoder, discriminator, discriminator2,
+def train(args, loader, loader2, generator, encoder, discriminator, discriminator2,
           vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device):
-    # kwargs_d = {'detach_aux': args.detach_d_aux_head}
     inception = real_mean = real_cov = mean_latent = None
     if args.eval_every > 0:
         inception = nn.DataParallel(load_patched_inception_v3()).to(device)
@@ -204,10 +200,7 @@ def train(args, loader, loader2, T_list,
             with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
                 f.write(f"Name: {getattr(args, 'name', 'NA')}\n{'-'*50}\n")
 
-    if args.dataset == 'imagefolder':
-        loader = sample_data2(loader)
-    else:
-        loader = sample_data(loader)
+    loader = sample_data(loader)
     pbar = range(args.iter)
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
@@ -239,20 +232,34 @@ def train(args, loader, loader2, T_list,
         else:
             d2_module = discriminator2
 
-    accum = 0.5 ** (32 / (10 * 1000))
+    # When joint training enabled, d_weight balances reconstruction loss and adversarial loss on 
+    # recontructed real images. This does not balance the overall AE loss and GAN loss.
+    d_weight = torch.tensor(1.0, device=device)
+    last_layer = None
+    if args.use_adaptive_weight:
+        if args.distributed:
+            last_layer = generator.module.get_last_layer()
+        else:
+            last_layer = generator.get_last_layer()
+    g_scale = 1
+
+    # accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
     r_t_stat = 0
+    r_t_dict = {'real': 0, 'fake': 0, 'recx': 0}  # r_t stat
 
     if args.augment and args.augment_p == 0:
-        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 256, device)
+        ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
+    ada_aug_p2 = args.augment_p if args.augment_p > 0 else 0.0
+    if args.decouple_d and args.augment and args.augment_p == 0:
+        ada_augment2 = AdaptiveAugment(args.ada_target, args.ada_length, args.ada_every, device)
 
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
-    sample_x, sample_idx = load_real_samples(args, loader)
-    assert (sample_x.shape[1] >= args.nframe_num)
-    sample_x1 = sample_x[:,0,...]
-    sample_x2 = sample_x[:,-1,...]
-    # sample_idx = torch.randperm(args.n_sample)
-    fid_batch_idx = sample_idx = None
+    sample_x = load_real_samples(args, loader)
+    if sample_x.ndim > 4:
+        sample_x = sample_x[:,0,...]
+
+    input_is_latent = args.latent_space != 'z'  # Encode in z space?
 
     n_step_max = max(args.n_step_d, args.n_step_e)
 
@@ -265,22 +272,18 @@ def train(args, loader, loader2, T_list,
         if i > args.iter:
             print("Done!")
             break
-        
-        frames = [get_batch(loader, device, T_list[i], not args.no_rand_T) for _ in range(n_step_max)]
+
+        if args.debug: util.seed_everything(i)
+        real_imgs = [next(loader).to(device) for _ in range(n_step_max)]
 
         # Train Discriminator
         requires_grad(generator, False)
         requires_grad(encoder, False)
         requires_grad(discriminator, True)
         for step_index in range(args.n_step_d):
-            frames1, frames2 = frames[step_index]
-            real_img = frames1
+            real_img = real_imgs[step_index]
             noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            if args.use_ema:
-                g_ema.eval()
-                fake_img, _ = g_ema(noise)
-            else:
-                fake_img, _ = generator(noise)
+            fake_img, _ = generator(noise)
             if args.augment:
                 real_img_aug, _ = augment(real_img, ada_aug_p)
                 fake_img, _ = augment(fake_img, ada_aug_p)
@@ -290,72 +293,20 @@ def train(args, loader, loader2, T_list,
             real_pred = discriminator(real_img_aug)
             d_loss_fake = F.softplus(fake_pred).mean()
             d_loss_real = F.softplus(-real_pred).mean()
-            if args.use_frames2_d:
-                real_pred2 = discriminator(frames2)
-                d_loss_real += F.softplus(-real_pred2).mean()
             loss_dict["real_score"] = real_pred.mean()
             loss_dict["fake_score"] = fake_pred.mean()
 
             d_loss_rec = 0.
-            if not args.decouple_d and args.lambda_rec_d > 0:  # Do not train D on x_rec if decouple_d
-                if args.use_ema:
-                    e_ema.eval()
-                    g_ema.eval()
-                    latent_real, _ = e_ema(real_img)
-                    rec_img, _ = g_ema([latent_real], input_is_latent=True)
-                else:
-                    latent_real, _ = encoder(real_img)
-                    rec_img, _ = generator([latent_real], input_is_latent=True)
+            if args.lambda_rec_d > 0 and not args.decouple_d:  # Do not train D on x_rec if decouple_d
+                latent_real, _ = encoder(real_img)
+                rec_img, _ = generator([latent_real], input_is_latent=input_is_latent)
+                if args.augment:
+                    rec_img, _ = augment(rec_img, ada_aug_p)
                 rec_pred = discriminator(rec_img)
                 d_loss_rec = F.softplus(rec_pred).mean()
-                loss_dict["rec_score"] = rec_pred.mean()
+                loss_dict["recx_score"] = rec_pred.mean()
 
-            d_loss_cross = 0.
-            if not args.decouple_d and args.lambda_cross_d > 0:
-                if args.use_ema:
-                    e_ema.eval()
-                    w1, _ = e_ema(frames1)
-                    w2, _ = e_ema(frames2)
-                else:
-                    w1, _ = encoder(frames1)
-                    w2, _ = encoder(frames2)
-                dw = w2 - w1
-                dw_shuffle = dw[torch.randperm(args.batch),...]
-                if args.use_ema:
-                    g_ema.eval()
-                    cross_img, _ = g_ema([w1 + dw_shuffle], input_is_latent=True)
-                else:
-                    cross_img, _ = generator([w1 + dw_shuffle], input_is_latent=True)
-                cross_pred = discriminator(cross_img)
-                d_loss_cross = F.softplus(cross_pred).mean()
-            
-            d_loss_fake_cross = 0.
-            if args.lambda_fake_cross_d > 0:
-                if args.use_ema:
-                    e_ema.eval()
-                    w1, _ = e_ema(frames1)
-                    w2, _ = e_ema(frames2)
-                else:
-                    w1, _ = encoder(frames1)
-                    w2, _ = encoder(frames2)
-                dw = w2 - w1
-                noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-                if args.use_ema:
-                    g_ema.eval()
-                    style = g_ema.get_styles(noise).view(args.batch, -1)
-                else:
-                    style = generator.get_styles(noise).view(args.batch, -1)
-                if dw.shape[1] < style.shape[1]:  # W space
-                    dw = dw.repeat(1, args.n_latent)
-                if args.use_ema:
-                    cross_img, _ = g_ema([style + dw], input_is_latent=True)
-                else:
-                    cross_img, _ = generator([style + dw], input_is_latent=True)
-                fake_cross_pred = discriminator(cross_img)
-                d_loss_fake_cross = F.softplus(fake_cross_pred).mean()
-
-            d_loss = (d_loss_real + d_loss_fake + d_loss_fake_cross * args.lambda_fake_cross_d + 
-                d_loss_rec * args.lambda_rec_d + d_loss_cross * args.lambda_cross_d)
+            d_loss = d_loss_real + d_loss_fake * args.lambda_fake_d + d_loss_rec * args.lambda_rec_d
             loss_dict["d"] = d_loss
 
             discriminator.zero_grad()
@@ -365,11 +316,18 @@ def train(args, loader, loader2, T_list,
         if args.augment and args.augment_p == 0:
             ada_aug_p = ada_augment.tune(real_pred)
             r_t_stat = ada_augment.r_t_stat
+        # Compute batchwise r_t
+        r_t_dict['real'] = torch.sign(real_pred).sum().item() / args.batch
+        r_t_dict['fake'] = torch.sign(fake_pred).sum().item() / args.batch
 
-        d_regularize = i % args.d_reg_every == 0
+        d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
         if d_regularize:
             real_img.requires_grad = True
-            real_pred = discriminator(real_img)
+            if args.augment:
+                real_img_aug, _ = augment(real_img, ada_aug_p)
+            else:
+                real_img_aug = real_img
+            real_pred = discriminator(real_img_aug)
             r1_loss = d_r1_loss(real_pred, real_img)
             discriminator.zero_grad()
             (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
@@ -381,52 +339,30 @@ def train(args, loader, loader2, T_list,
             requires_grad(generator, False)
             requires_grad(encoder, False)
             requires_grad(discriminator2, True)
+            if args.debug: util.seed_everything(i)
             for step_index in range(args.n_step_e):  # n_step_d2 is same as n_step_e
-                frames1, frames2 = frames[step_index]
-                real_img = frames1
-                if args.use_ema:
-                    e_ema.eval()
-                    g_ema.eval()
-                    latent_real, _ = e_ema(real_img)
-                    rec_img, _ = g_ema([latent_real], input_is_latent=True)
+                real_img = real_imgs[step_index]
+                latent_real, _ = encoder(real_img)
+                rec_img, _ = generator([latent_real], input_is_latent=input_is_latent)
+                if args.augment:
+                    real_img_aug, _ = augment(real_img, ada_aug_p2)
+                    rec_img, _ = augment(rec_img, ada_aug_p2)
                 else:
-                    latent_real, _ = encoder(real_img)
-                    rec_img, _ = generator([latent_real], input_is_latent=True)
-                real_pred1 = discriminator2(frames1)
+                    real_img_aug = real_img
                 rec_pred = discriminator2(rec_img)
-                d2_loss_real = F.softplus(-real_pred1).mean()
+                real_pred = discriminator2(real_img_aug)
                 d2_loss_rec = F.softplus(rec_pred).mean()
-                if args.use_frames2_d:
-                    real_pred2 = discriminator2(frames2)
-                    d2_loss_real += F.softplus(-real_pred2).mean()
+                d2_loss_real = F.softplus(-real_pred).mean()
 
-                if args.use_ema:
-                    e_ema.eval()
-                    w1, _ = e_ema(frames1)
-                    w2, _ = e_ema(frames2)
-                else:
-                    w1, _ = encoder(frames1)
-                    w2, _ = encoder(frames2)
-                dw = w2 - w1
-                dw_shuffle = dw[torch.randperm(args.batch),...]
-                if args.use_ema:
-                    g_ema.eval()
-                    cross_img, _ = g_ema([w1 + dw_shuffle], input_is_latent=True)
-                else:
-                    cross_img, _ = generator([w1 + dw_shuffle], input_is_latent=True)
-                cross_pred = discriminator2(cross_img)
-                d2_loss_cross = F.softplus(cross_pred).mean()
-
-                d2_loss = d2_loss_real + d2_loss_rec + d2_loss_cross
+                d2_loss = d2_loss_real + d2_loss_rec
                 loss_dict["d2"] = d2_loss
-                loss_dict["rec_score"] = rec_pred.mean()
-                loss_dict["cross_score"] = cross_pred.mean()
+                loss_dict["recx_score"] = rec_pred.mean()
 
                 discriminator2.zero_grad()
                 d2_loss.backward()
                 d2_optim.step()
 
-            d_regularize = i % args.d_reg_every == 0
+            d_regularize = args.d_reg_every > 0 and i % args.d_reg_every == 0
             if d_regularize:
                 real_img.requires_grad = True
                 real_pred = discriminator2(real_img)
@@ -434,105 +370,105 @@ def train(args, loader, loader2, T_list,
                 discriminator2.zero_grad()
                 (args.r1 / 2 * r1_loss * args.d_reg_every + 0 * real_pred[0]).backward()
                 d2_optim.step()
+            
+            if args.augment and args.augment_p == 0:
+                ada_aug_p2 = ada_augment2.tune(rec_pred)
 
-        # Train Encoder and Generator
+        r_t_dict['recx'] = torch.sign(rec_pred).sum().item() / args.batch
+
+        # Train Encoder
+        joint = args.joint and g_scale > 1e-6
         requires_grad(encoder, True)
-        requires_grad(generator, True)
+        requires_grad(generator, joint)
         requires_grad(discriminator, False)
         requires_grad(discriminator2, False)
-        pix_loss = vgg_loss = adv_loss = cross_loss = torch.tensor(0., device=device)
+        if args.debug: util.seed_everything(i)
+        pix_loss = vgg_loss = adv_loss = torch.tensor(0., device=device)
         for step_index in range(args.n_step_e):
-            frames1, frames2 = frames[step_index]
-            real_img = frames1
+            real_img = real_imgs[step_index]
             latent_real, _ = encoder(real_img)
-            rec_img, _ = generator([latent_real], input_is_latent=True)
+            rec_img, _ = generator([latent_real], input_is_latent=input_is_latent)
             if args.lambda_pix > 0:
                 if args.pix_loss == 'l2':
                     pix_loss = torch.mean((rec_img - real_img) ** 2)
-                else:
+                elif args.pix_loss == 'l1':
                     pix_loss = F.l1_loss(rec_img, real_img)
+                else:
+                    raise NotImplementedError
             if args.lambda_vgg > 0:
                 vgg_loss = torch.mean((vggnet(real_img) - vggnet(rec_img)) ** 2)
             if args.lambda_adv > 0:
                 if not args.decouple_d:
-                    rec_pred = discriminator(rec_img)
+                    if args.augment:
+                        rec_img_aug, _ = augment(rec_img, ada_aug_p)
+                    else:
+                        rec_img_aug = rec_img
+                    rec_pred = discriminator(rec_img_aug)
                 else:
-                    rec_pred = discriminator2(rec_img)
+                    if args.augment:
+                        rec_img_aug, _ = augment(rec_img, ada_aug_p2)
+                    else:
+                        rec_img_aug = rec_img
+                    rec_pred = discriminator2(rec_img_aug)
                 adv_loss = g_nonsaturating_loss(rec_pred)
-
-            if args.lambda_cross > 0:
-                w1, _ = encoder(frames1)
-                w2, _ = encoder(frames2)
-                dw = w2 - w1
-                dw_shuffle = dw[torch.randperm(args.batch),...]
-                cross_img, _ = generator([w1 + dw_shuffle], input_is_latent=True)
-                if not args.decouple_d:
-                    cross_pred = discriminator(cross_img)
-                else:
-                    cross_pred = discriminator2(cross_img)
-                cross_loss = g_nonsaturating_loss(cross_pred)
             
-            e_loss = (pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv + 
-                cross_loss * args.lambda_cross)
-            loss_dict["e"] = e_loss
+            if args.use_adaptive_weight and i >= args.disc_iter_start:
+                nll_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg
+                g_loss = adv_loss * args.lambda_adv
+                d_weight = calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
+
+            rec_w_loss = 0
+            if args.lambda_rec_w > 0:
+                mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
+                noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
+                fake_img, latent_fake = generator(noise, return_latents=True, detach_style=True)
+                if args.which_latent == 'w_tied':
+                    latent_fake = latent_fake[:,0,:]
+                else:
+                    latent_fake = latent_fake.view(args.batch, -1)
+                latent_pred, _ = encoder(fake_img)
+                rec_w_loss = torch.mean((latent_pred - latent_fake.detach()) ** 2)
+
+            ae_loss = (
+                pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + 
+                d_weight * adv_loss * args.lambda_adv + 
+                rec_w_loss * args.lambda_rec_w
+            )
+            loss_dict["ae"] = ae_loss
             loss_dict["pix"] = pix_loss
             loss_dict["vgg"] = vgg_loss
             loss_dict["adv"] = adv_loss
 
-            encoder.zero_grad()
-            generator.zero_grad()
-            e_loss.backward()
-            e_optim.step()
-            g_optim.step()
+            if joint:
+                encoder.zero_grad()
+                generator.zero_grad()
+                ae_loss.backward()
+                e_optim.step()
+                if args.g_decay is not None:
+                    scale_grad(generator, g_scale)
+                    g_scale *= args.g_decay
+                g_optim.step()
+            else:
+                encoder.zero_grad()
+                ae_loss.backward()
+                e_optim.step()
 
         # Train Generator
         requires_grad(generator, True)
         requires_grad(encoder, False)
         requires_grad(discriminator, False)
         requires_grad(discriminator2, False)
-        frames1, frames2 = frames[0]
-        real_img = frames1
-        g_loss_fake = 0.
-        if args.lambda_fake_g > 0:
-            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            fake_img, _ = generator(noise)
-            if args.augment:
-                fake_img, _ = augment(fake_img, ada_aug_p)
-            fake_pred = discriminator(fake_img)
-            g_loss_fake = g_nonsaturating_loss(fake_pred)
-            if args.no_sim_g:
-                generator.zero_grad()
-                (g_loss_fake * args.lambda_fake_g).backward()
-                g_optim.step()
-
-        g_loss_fake_cross = 0.
-        if args.lambda_fake_cross_g > 0:
-            if args.use_ema:
-                e_ema.eval()
-                w1, _ = e_ema(frames1)
-                w2, _ = e_ema(frames2)
-            else:
-                w1, _ = encoder(frames1)
-                w2, _ = encoder(frames2)
-            dw = w2 - w1
-            noise = mixing_noise(args.batch, args.latent, args.mixing, device)
-            style = generator.get_styles(noise).view(args.batch, -1)
-            if dw.shape[1] < style.shape[1]:  # W space
-                dw = dw.repeat(1, args.n_latent)
-            cross_img, _ = generator([style + dw], input_is_latent=True)
-            fake_cross_pred = discriminator(cross_img)
-            g_loss_fake_cross = g_nonsaturating_loss(fake_cross_pred)
-            if args.no_sim_g:
-                generator.zero_grad()
-                (g_loss_fake_cross * args.lambda_fake_cross_g).backward()
-                g_optim.step()
-
-        g_loss = g_loss_fake * args.lambda_fake_g + g_loss_fake_cross * args.lambda_fake_cross_g
-        loss_dict["g"] = g_loss
-        if not args.no_sim_g:
-            generator.zero_grad()
-            g_loss.backward()
-            g_optim.step()
+        if args.debug: util.seed_everything(i)
+        noise = mixing_noise(args.batch, args.latent, args.mixing, device)
+        fake_img, _ = generator(noise)
+        if args.augment:
+            fake_img, _ = augment(fake_img, ada_aug_p)
+        fake_pred = discriminator(fake_img)
+        g_loss_fake = g_nonsaturating_loss(fake_pred)
+        loss_dict["g"] = g_loss_fake
+        generator.zero_grad()
+        (g_loss_fake * args.lambda_fake_g).backward()
+        g_optim.step()
 
         g_regularize = args.g_reg_every > 0 and i % args.g_reg_every == 0
         if g_regularize:
@@ -554,16 +490,42 @@ def train(args, loader, loader2, T_list,
         loss_dict["path"] = path_loss
         loss_dict["path_length"] = path_lengths.mean()
 
-        accumulate(e_ema, e_module, accum)
-        accumulate(g_ema, g_module, accum)
+        # Train Encoder
+        if args.lambda_rec_w_extra > 0:
+            requires_grad(encoder, True)
+            requires_grad(generator, False)
+            requires_grad(discriminator, False)
+            requires_grad(discriminator2, False)
+            mixing_prob = 0 if args.which_latent == 'w_tied' else args.mixing
+            noise = mixing_noise(args.batch, args.latent, mixing_prob, device)
+            fake_img, latent_fake = generator(noise, return_latents=True)
+            if args.which_latent == 'w_tied':
+                latent_fake = latent_fake[:,0,:]
+            else:
+                latent_fake = latent_fake.view(args.batch, -1)
+            latent_pred, _ = encoder(fake_img)
+            rec_w_loss_extra = torch.mean((latent_pred - latent_fake.detach()) ** 2)
+            encoder.zero_grad()
+            (rec_w_loss_extra * args.lambda_rec_w_extra).backward()
+            e_optim.step()
+
+        # Update EMA
+        ema_nimg = args.ema_kimg * 1000
+        if args.ema_rampup is not None:
+            ema_nimg = min(ema_nimg, i * args.batch * args.ema_rampup)
+        accum = 0.5 ** (args.batch / max(ema_nimg, 1e-8))
+        accumulate(g_ema, g_module, 0 if args.no_ema_g else accum)
+        accumulate(e_ema, e_module, 0 if args.no_ema_e else accum)
 
         loss_reduced = reduce_loss_dict(loss_dict)
         d_loss_val = loss_reduced["d"].mean().item()
         g_loss_val = loss_reduced["g"].mean().item()
+        ae_loss_val = loss_reduced["ae"].mean().item()
         r1_val = loss_reduced["r1"].mean().item()
         path_loss_val = loss_reduced["path"].mean().item()
         real_score_val = loss_reduced["real_score"].mean().item()
         fake_score_val = loss_reduced["fake_score"].mean().item()
+        recx_score_val = loss_reduced["recx_score"].mean().item()
         path_length_val = loss_reduced["path_length"].mean().item()
         pix_loss_val = loss_reduced["pix"].mean().item()
         vgg_loss_val = loss_reduced["vgg"].mean().item()
@@ -574,54 +536,65 @@ def train(args, loader, loader2, T_list,
         if get_rank() == 0:
             pbar.set_description(
                 (
-                    f"d: {d_loss_val:.4f}; g: {g_loss_val:.4f}; r1: {r1_val:.4f}; "
-                    f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
+                    f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; ae: {ae_loss_val:.4f}; "
+                    f"g: {g_loss_val:.4f}; path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
                     f"augment: {ada_aug_p:.4f}; "
-                    f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}"
+                    f"d_weight: {d_weight.item():.4f}; "
+                    # f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}"
                 )
             )
 
             if i % args.log_every == 0:
                 with torch.no_grad():
-                    latent_x, _ = e_ema(sample_x1)
-                    fake_x, _ = generator([latent_x], input_is_latent=True, return_latents=False)
-                    sample_pix_loss = torch.sum((sample_x1 - fake_x) ** 2)
-                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; pix: {avg_pix_loss.avg}; vgg: {avg_vgg_loss.avg}; "
-                            f"ref: {sample_pix_loss.item()};\n")
-
-            if args.eval_every > 0 and i % args.eval_every == 0:
-                with torch.no_grad():
                     g_ema.eval()
                     e_ema.eval()
-                    # Sample FID
-                    if args.truncation < 1:
-                        mean_latent = g_ema.mean_latent(4096)
-                    features = extract_feature_from_samples(
-                        g_ema, inception, args.truncation, mean_latent, 64, args.n_sample_fid, args.device
-                    ).numpy()
-                    sample_mean = np.mean(features, 0)
-                    sample_cov = np.cov(features, rowvar=False)
-                    fid_sa = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                    # Recon FID
-                    features = extract_feature_from_recon_hybrid(
-                        e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        mode='recon',
-                    ).numpy()
-                    sample_mean = np.mean(features, 0)
-                    sample_cov = np.cov(features, rowvar=False)
-                    fid_re = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                    # Hybrid FID
-                    features = extract_feature_from_recon_hybrid(
-                        e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
-                        mode='hybrid', shuffle_idx=fid_batch_idx
-                    ).numpy()
-                    sample_mean = np.mean(features, 0)
-                    sample_cov = np.cov(features, rowvar=False)
-                    fid_hy = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
-                # print("Sample FID:", fid_sa, "Recon FID:", fid_re, "Hybrid FID:", fid_hy)
-                with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
-                    f.write(f"{i:07d}; sample fid: {float(fid_sa):.4f}; recon fid: {float(fid_re):.4f}; hybrid fid: {float(fid_hy):.4f};\n")
+                    nrow = int(args.n_sample ** 0.5)
+                    nchw = list(sample_x.shape)[1:]
+                    # Reconstruction of real images
+                    latent_x, _ = e_ema(sample_x)
+                    rec_real, _ = g_ema([latent_x], input_is_latent=input_is_latent)
+                    sample = torch.cat((sample_x.reshape(args.n_sample//nrow, nrow, *nchw), 
+                                        rec_real.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    utils.save_image(
+                        sample.reshape(2*args.n_sample, *nchw),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
+                        nrow=nrow,
+                        normalize=True,
+                        value_range=(-1, 1),
+                    )
+                    ref_pix_loss = torch.sum(torch.abs(sample_x - rec_real))
+                    ref_vgg_loss = torch.mean((vggnet(sample_x) - vggnet(rec_real)) ** 2) if vggnet is not None else 0
+                    # Fixed fake samples and reconstructions
+                    sample_gz, _ = g_ema([sample_z])
+                    latent_gz, _ = e_ema(sample_gz)
+                    rec_fake, _ = g_ema([latent_gz], input_is_latent=input_is_latent)
+                    sample = torch.cat((sample_gz.reshape(args.n_sample//nrow, nrow, *nchw), 
+                                        rec_fake.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
+                    utils.save_image(
+                        sample.reshape(2*args.n_sample, *nchw),
+                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
+                        nrow=nrow,
+                        normalize=True,
+                        value_range=(-1, 1),
+                    )
+                    # gz_pix_loss = torch.sum(torch.abs(sample_gz - rec_fake))
+                    # gz_vgg_loss = torch.mean((vggnet(sample_gz) - vggnet(rec_fake)) ** 2) if vggnet is not None else 0
+
+                with open(os.path.join(args.log_dir, 'log.txt'), 'a+') as f:
+                    f.write(
+                        (
+                            f"{i:07d}; "
+                            f"d: {d_loss_val:.4f}; r1: {r1_val:.4f}; ae: {ae_loss_val:.4f}; "
+                            f"g: {g_loss_val:.4f}; path: {path_loss_val:.4f}; mean_path: {mean_path_length_avg:.4f}; "
+                            f"augment: {ada_aug_p:.4f}; {'; '.join([f'{k}: {r_t_dict[k]:.4f}' for k in r_t_dict])}; "
+                            f"real_score: {real_score_val:.4f}; fake_score: {fake_score_val:.4f}; recx_score: {recx_score_val:.4f}; "
+                            f"pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; "
+                            f"ref_pix: {ref_pix_loss.item():.4f}; ref_vgg: {ref_vgg_loss.item():.4f}; "
+                            # f"gz_pix: {gz_pix_loss.item():.4f}; gz_vgg: {gz_vgg_loss.item():.4f}; "
+                            f"d_weight: {d_weight.item():.4f}; "
+                            f"\n"
+                        )
+                    )
 
             if wandb and args.wandb:
                 wandb.log(
@@ -639,87 +612,41 @@ def train(args, loader, loader2, T_list,
                     }
                 )
 
-            if i % args.log_every == 0:
+            if args.eval_every > 0 and i % args.eval_every == 0:
                 with torch.no_grad():
+                    fid_sa = fid_re = fid_sr = 0
                     g_ema.eval()
                     e_ema.eval()
-                    nrow = int(args.n_sample ** 0.5)
-                    nchw = list(sample_x1.shape)[1:]
-                    # Fixed fake samples
-                    sample, _ = g_ema([sample_z])
-                    utils.save_image(
-                        sample,
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample.png"),
-                        nrow=nrow,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
-                    # Fake hybrid samples
-                    w1, _ = e_ema(sample_x1)
-                    w2, _ = e_ema(sample_x2)
-                    dw = w2 - w1
-                    style_z = g_ema.get_styles([sample_z]).view(args.n_sample, -1)
-                    if dw.shape[1] < style_z.shape[1]:  # W space
-                        dw = dw.repeat(1, args.n_latent)
-                    fake_img, _ = g_ema([style_z + dw], input_is_latent=True)
-                    drive = torch.cat((
-                        sample_x1.reshape(args.n_sample, 1, *nchw),
-                        sample_x2.reshape(args.n_sample, 1, *nchw),
-                    ), 1)
-                    source = torch.cat((
-                        sample.reshape(args.n_sample, 1, *nchw),
-                        fake_img.reshape(args.n_sample, 1, *nchw),
-                    ), 1)
-                    sample = torch.cat((
-                        drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
-                        source.reshape(args.n_sample//nrow, 2*nrow, *nchw),
-                    ), 1)
-                    utils.save_image(
-                        sample.reshape(4*args.n_sample, *nchw),
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-sample_hybrid.png"),
-                        nrow=2*nrow,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
-                    # Reconstruction samples
-                    latent_real, _ = e_ema(sample_x1)
-                    fake_img, _ = g_ema([latent_real], input_is_latent=True, return_latents=False)
-                    sample = torch.cat((sample_x1.reshape(args.n_sample//nrow, nrow, *nchw), 
-                                        fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
-                    utils.save_image(
-                        sample.reshape(2*args.n_sample, *nchw),
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-recon.png"),
-                        nrow=nrow,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
-                    # Cross reconstruction: [real_y1, real_y2; real_x1, fake_x2]
-                    w1, _ = e_ema(sample_x1)
-                    w2, _ = e_ema(sample_x2)
-                    dw = w2 - w1
-                    dw = torch.cat(dw.chunk(2, 0)[::-1], 0) if sample_idx is None else dw[sample_idx,...]
-                    fake_img, _ = g_ema([w1 + dw], input_is_latent=True, return_latents=False)
-                    # sample = torch.cat((sample_x2.reshape(args.n_sample//nrow, nrow, *nchw), 
-                    #                     fake_img.reshape(args.n_sample//nrow, nrow, *nchw)), 1)
-                    drive = torch.cat((
-                        torch.cat(sample_x1.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
-                        torch.cat(sample_x2.chunk(2, 0)[::-1], 0).reshape(args.n_sample, 1, *nchw),
-                    ), 1)  # [n_sample, 2, C, H, w]
-                    source = torch.cat((
-                        sample_x1.reshape(args.n_sample, 1, *nchw),
-                        fake_img.reshape(args.n_sample, 1, *nchw),
-                    ), 1)  # [n_sample, 2, C, H, w]
-                    sample = torch.cat((
-                        drive.reshape(args.n_sample//nrow, 2*nrow, *nchw),
-                        source.reshape(args.n_sample//nrow, 2*nrow, *nchw),
-                    ), 1)  # [n_sample//nrow, 4*nrow, C, H, W]
-                    utils.save_image(
-                        sample.reshape(4*args.n_sample, *nchw),
-                        os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}-cross.png"),
-                        nrow=2*nrow,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
+                    if args.truncation < 1:
+                        mean_latent = g_ema.mean_latent(4096)
+                    # Sample FID
+                    if 'fid_sample' in args.which_metric:
+                        features = extract_feature_from_samples(
+                            g_ema, inception, args.truncation, mean_latent, 64, args.n_sample_fid, args.device
+                        ).numpy()
+                        sample_mean = np.mean(features, 0)
+                        sample_cov = np.cov(features, rowvar=False)
+                        fid_sa = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
+                    # Sample reconstruction FID
+                    if 'fid_sample_recon' in args.which_metric:
+                        features = extract_feature_from_samples(
+                            g_ema, inception, args.truncation, mean_latent, 64, args.n_sample_fid, args.device,
+                            mode='recon', encoder=e_ema, input_is_latent=input_is_latent,
+                        ).numpy()
+                        sample_mean = np.mean(features, 0)
+                        sample_cov = np.cov(features, rowvar=False)
+                        fid_sr = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
+                    # Real reconstruction FID
+                    if 'fid_recon' in args.which_metric:
+                        features = extract_feature_from_reconstruction(
+                            e_ema, g_ema, inception, args.truncation, mean_latent, loader2, args.device,
+                            input_is_latent=input_is_latent, mode='recon',
+                        ).numpy()
+                        sample_mean = np.mean(features, 0)
+                        sample_cov = np.cov(features, rowvar=False)
+                        fid_re = calc_fid(sample_mean, sample_cov, real_mean, real_cov)
+                with open(os.path.join(args.log_dir, 'log_fid.txt'), 'a+') as f:
+                    f.write(f"{i:07d}; sample: {float(fid_sa):.4f}; rec_fake: {float(fid_sr):.4f}; rec_real: {float(fid_re):.4f};\n")
 
             if i % args.save_every == 0:
                 torch.save(
@@ -736,6 +663,7 @@ def train(args, loader, loader2, T_list,
                         "d2_optim": d2_optim.state_dict() if args.decouple_d else None,
                         "args": args,
                         "ada_aug_p": ada_aug_p,
+                        "ada_aug_p2": ada_aug_p2,
                         "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"{str(i).zfill(6)}.pt"),
@@ -756,6 +684,7 @@ def train(args, loader, loader2, T_list,
                         "d2_optim": d2_optim.state_dict() if args.decouple_d else None,
                         "args": args,
                         "ada_aug_p": ada_aug_p,
+                        "ada_aug_p2": ada_aug_p2,
                         "iter": i,
                     },
                     os.path.join(args.log_dir, 'weight', f"latest.pt"),
@@ -768,6 +697,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StyleGAN2 trainer")
 
     parser.add_argument("--path", type=str, help="path to the lmdb dataset")
+    parser.add_argument("--arch", type=str, default='stylegan2', help="model architectures (stylegan2 | swagan)")
     parser.add_argument("--dataset", type=str, default='multires')
     parser.add_argument("--cache", type=str, default=None)
     parser.add_argument("--sample_cache", type=str, default=None)
@@ -775,7 +705,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_root", type=str, help="where to save training logs", default='logs')
     parser.add_argument("--log_every", type=int, default=100, help="save samples every # iters")
     parser.add_argument("--save_every", type=int, default=1000, help="save checkpoints every # iters")
-    parser.add_argument("--save_latest_every", type=int, default=100, help="save latest checkpoints every # iters")
+    parser.add_argument("--save_latest_every", type=int, default=200, help="save latest checkpoints every # iters")
     parser.add_argument(
         "--iter", type=int, default=800000, help="total training iterations"
     )
@@ -864,9 +794,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ada_every",
         type=int,
-        default=256,
+        default=8,
         help="probability update interval of the adaptive augmentation",
     )
+    parser.add_argument("--debug", action='store_true')
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--which_encoder", type=str, default='style')
     parser.add_argument("--which_latent", type=str, default='w_plus')
@@ -875,37 +806,42 @@ if __name__ == "__main__":
     parser.add_argument("--vgg_ckpt", type=str, default="vgg16.pth")
     parser.add_argument("--output_layer_idx", type=int, default=23)
     parser.add_argument("--lambda_vgg", type=float, default=5e-5)
-    parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_adv", type=float, default=0.1)
+    parser.add_argument("--lambda_pix", type=float, default=1.0, help="recon loss on pixel (x)")
     parser.add_argument("--lambda_fake_d", type=float, default=1.0)
-    parser.add_argument("--lambda_rec_d", type=float, default=1.0)
-    parser.add_argument("--lambda_cross_d", type=float, default=1.0)
-    parser.add_argument("--lambda_fake_cross_d", type=float, default=0)
-    parser.add_argument("--lambda_cross", type=float, default=0.1)
+    parser.add_argument("--lambda_rec_d", type=float, default=1.0, help="d1, recon of real image")
     parser.add_argument("--lambda_fake_g", type=float, default=1.0)
-    parser.add_argument("--lambda_fake_cross_g", type=float, default=0)
+    parser.add_argument("--lambda_rec_w", type=float, default=0, help="recon sampled w")
     parser.add_argument("--pix_loss", type=str, default='l2')
+    parser.add_argument("--joint", action='store_true', help="update generator with encoder")
     parser.add_argument("--inception", type=str, default=None, help="path to precomputed inception embedding")
     parser.add_argument("--eval_every", type=int, default=1000, help="interval of metric evaluation")
     parser.add_argument("--truncation", type=float, default=1, help="truncation factor")
     parser.add_argument("--n_sample_fid", type=int, default=50000, help="number of the samples for calculating FID")
+    parser.add_argument("--nframe_num", type=int, default=5)
     parser.add_argument("--decouple_d", action='store_true')
-    parser.add_argument("--use_ema", action='store_true')
-    parser.add_argument("--use_frames2_d", action='store_true')
     parser.add_argument("--n_step_d", type=int, default=1)
     parser.add_argument("--n_step_e", type=int, default=1)
-    parser.add_argument("--nframe_num", type=int, default=5)
-    parser.add_argument("--no_sim_g", action='store_true')
-    parser.add_argument("--debug", type=str, default='none')
     parser.add_argument("--resume", action='store_true')
     parser.add_argument("--e_ckpt", type=str, default=None, help="path to the checkpoint of encoder")
     parser.add_argument("--g_ckpt", type=str, default=None, help="path to the checkpoint of generator")
     parser.add_argument("--d_ckpt", type=str, default=None, help="path to the checkpoint of discriminator")
     parser.add_argument("--d2_ckpt", type=str, default=None, help="path to the checkpoint of discriminator2")
     parser.add_argument("--train_from_scratch", action='store_true')
-    parser.add_argument("--no_rand_T", action='store_true')
-    parser.add_argument('--nframe_num_range', type=util.str2list, default=[])
-    parser.add_argument('--nframe_iter_range', type=util.str2list, default=[])
+    parser.add_argument("--limit_train_batches", type=float, default=1)
+    parser.add_argument("--g_decay", type=float, default=None, help="g decay factor")
+    parser.add_argument("--n_mlp_g", type=int, default=8)
+    parser.add_argument("--ema_kimg", type=int, default=10, help="Half-life of the exponential moving average (EMA) of generator weights.")
+    parser.add_argument("--ema_rampup", type=float, default=None, help="EMA ramp-up coefficient.")
+    parser.add_argument("--no_ema_e", action='store_true')
+    parser.add_argument("--no_ema_g", action='store_true')
+    parser.add_argument("--which_metric", type=str, nargs='*', default=['fid_sample', 'fid_sample_recon', 'fid_recon'])
+    parser.add_argument("--use_adaptive_weight", action='store_true', help="adaptive weight borrowed from VQGAN")
+    parser.add_argument("--disc_iter_start", type=int, default=30000)
+    parser.add_argument("--which_phi_e", type=str, default='lin2')
+    parser.add_argument("--which_phi_d", type=str, default='lin2')
+    parser.add_argument("--latent_space", type=str, default='w', help="latent space (w | p | pn | z)")
+    parser.add_argument("--lambda_rec_w_extra", type=float, default=0, help="recon sampled w")
 
     args = parser.parse_args()
     util.seed_everything()
@@ -919,7 +855,7 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
         synchronize()
 
-    args.n_mlp = 8
+    # args.n_mlp = 8
     args.n_latent = int(np.log2(args.size)) * 2 - 2
     args.latent = 512
     if args.which_latent == 'w_plus':
@@ -929,18 +865,32 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
 
+    assert((not args.use_adaptive_weight) or args.joint)
+    assert(args.latent_space in ['w', 'z'])
+
     args.start_iter = 0
+    args.iter += 1
     util.set_log_dir(args)
     util.print_args(parser, args)
 
+    if args.arch == 'stylegan2':
+        from model import Generator, Discriminator
+
+    elif args.arch == 'swagan':
+        from swagan import Generator, Discriminator
+
     generator = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
+        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier
     ).to(device)
+
+    st()
+
+
     discriminator = Discriminator(
-        args.size, channel_multiplier=args.channel_multiplier,
+        args.size, channel_multiplier=args.channel_multiplier, which_phi=args.which_phi_d
     ).to(device)
     g_ema = Generator(
-        args.size, args.latent, args.n_mlp, channel_multiplier=args.channel_multiplier
+        args.size, args.latent, args.n_mlp_g, channel_multiplier=args.channel_multiplier
     ).to(device)
     g_ema.eval()
     accumulate(g_ema, generator, 0)
@@ -962,7 +912,7 @@ if __name__ == "__main__":
     discriminator2 = d2_optim = None
     if args.decouple_d:
         discriminator2 = Discriminator(
-            args.size, channel_multiplier=args.channel_multiplier,
+            args.size, channel_multiplier=args.channel_multiplier, which_phi=args.which_phi_d
         ).to(device)
         d2_optim = optim.Adam(
             discriminator2.parameters(),
@@ -974,17 +924,17 @@ if __name__ == "__main__":
     if args.which_encoder == 'idinvert':
         from idinvert_pytorch.models.stylegan_encoder_network import StyleGANEncoderNet
         encoder = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
-            use_wscale=args.use_wscale).to(device)
+            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
         e_ema = StyleGANEncoderNet(resolution=args.size, w_space_dim=args.latent,
-            which_latent=args.which_latent, reshape_latent=True,
-            use_wscale=args.use_wscale).to(device)
+            which_latent=args.which_latent, use_wscale=args.use_wscale).to(device)
     else:
         from model import Encoder
         encoder = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, which_phi=args.which_phi_e,
+            stddev_group=args.stddev_group).to(device)
         e_ema = Encoder(args.size, args.latent, channel_multiplier=args.channel_multiplier,
-            which_latent=args.which_latent, reshape_latent=True, stddev_group=args.stddev_group).to(device)
+            which_latent=args.which_latent, which_phi=args.which_phi_e,
+            stddev_group=args.stddev_group).to(device)
     e_ema.eval()
     accumulate(e_ema, encoder, 0)
     
@@ -1049,8 +999,7 @@ if __name__ == "__main__":
             discriminator.load_state_dict(d_ckpt["d"])
             d_optim.load_state_dict(d_ckpt["d_optim"])
         if args.d2_ckpt is not None:
-            # D2 is for recon and hybrid, still named 'd' in d2_ckpt
-            print("load d model:", args.d2_ckpt)
+            print("load d2 model:", args.d2_ckpt)
             d2_ckpt = torch.load(args.d2_ckpt, map_location=lambda storage, loc: storage)
             discriminator2.load_state_dict(d2_ckpt["d"])
             d2_optim.load_state_dict(d2_ckpt["d_optim"])
@@ -1081,31 +1030,17 @@ if __name__ == "__main__":
                 output_device=args.local_rank,
                 broadcast_buffers=False,
             )
-    # T_list = util.get_nframe_num(args)
-    T_list = util.linspace(args.nframe_iter_range, args.nframe_num_range, args.iter, args.nframe_num)
-    dataset = None
-    if args.dataset == 'videofolder':
-        # [Note] Potentially, same transforms will be applied to a batch of images,
-        # either a sequence or a pair (optical flow), so we should apply ToTensor first.
-        transform = transforms.Compose(
-            [
-                # transforms.ToTensor(),  # this should be done in loader
-                transforms.RandomHorizontalFlip(),
-                transforms.Resize(args.size),  # Image.LANCZOS
-                transforms.CenterCrop(args.size),
-                # transforms.ToTensor(),  # normally placed here
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True),
-            ]
-        )
-        dataset = VideoFolderDataset(args.path, transform, mode='nframe',
-            nframe_num=args.nframe_num, cache=args.cache, unbind=False,
-        )
-        if len(dataset) == 0:
-            raise ValueError
+
+    dataset = get_image_dataset(args, args.dataset, args.path, train=True)
+    if args.limit_train_batches < 1:
+        indices = torch.randperm(len(dataset))[:int(args.limit_train_batches * len(dataset))]
+        dataset1 = data.Subset(dataset, indices)
+    else:
+        dataset1 = dataset
     loader = data.DataLoader(
-        dataset,
+        dataset1,
         batch_size=args.batch,
-        sampler=data_sampler(dataset, shuffle=True, distributed=args.distributed),
+        sampler=data_sampler(dataset1, shuffle=True, distributed=args.distributed),
         drop_last=True,
         num_workers=args.num_workers,
     )
@@ -1115,12 +1050,14 @@ if __name__ == "__main__":
         indices = torch.randperm(len(dataset))[:args.n_sample_fid]
         dataset2 = data.Subset(dataset, indices)
         loader2 = data.DataLoader(dataset2, batch_size=64, num_workers=4, shuffle=False)
+        if args.sample_cache is not None:
+            load_real_samples(args, sample_data(loader2))
 
     if get_rank() == 0 and wandb is not None and args.wandb:
         wandb.init(project=args.name)
+    util.print_models([generator, discriminator, encoder], args)
 
     train(
-        args, loader, loader2, T_list,
-        generator, encoder, discriminator, discriminator2,
+        args, loader, loader2, generator, encoder, discriminator, discriminator2,
         vggnet, g_optim, e_optim, d_optim, d2_optim, g_ema, e_ema, device
     )

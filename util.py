@@ -48,10 +48,9 @@ def seed_everything(seed=42):
 
 def set_log_dir(args):
     args.log_dir = os.path.join(args.log_root, args.name)
-    if not os.path.exists(args.log_dir):
-        os.makedirs(args.log_dir)
-        os.makedirs(os.path.join(args.log_dir, 'sample'))
-        os.makedirs(os.path.join(args.log_dir, 'weight'))
+    os.makedirs(args.log_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.log_dir, 'sample'), exist_ok=True)
+    os.makedirs(os.path.join(args.log_dir, 'weight'), exist_ok=True)
     return args
 
 
@@ -130,22 +129,23 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-def get_nframe_num(args):
-    if args.nframe_num_range and args.nframe_iter_range:
-        nframe_num_list = (
-            [args.nframe_num_range[0]] * max(0, int(args.nframe_iter_range[0])) + 
-            list(np.linspace(args.nframe_num_range[0], args.nframe_num_range[1],
-                args.nframe_iter_range[1] - args.nframe_iter_range[0] + 1, dtype=int)) + 
-            [args.nframe_num_range[1]] * max(0, int(args.iter - args.nframe_iter_range[1] + 2))
+def linspace(idx_range, val_range, idx_max, val_default=None):
+    if len(idx_range) >= 2 and len(val_range) >= 2:
+        dtype = np.array(val_range).dtype
+        val_list = (
+            [val_range[0]] * max(0, int(idx_range[0])) + 
+            list(np.linspace(val_range[0], val_range[1],
+                idx_range[1] - idx_range[0] + 1, dtype=dtype)) + 
+            [val_range[1]] * max(0, int(idx_max - idx_range[1] + 2))
         )
     else:
-        nframe_num_list = [args.nframe_num] * (args.iter + 2)
-    return nframe_num_list
+        val_list = [val_default] * (idx_max + 1)
+    return val_list
 
 
 def save_image(ximg, path):
     n_sample = ximg.shape[0]
-    utils.save_image(ximg, path, nrow=int(n_sample ** 0.5), normalize=True, range=(-1, 1))
+    utils.save_image(ximg, path, nrow=int(n_sample ** 0.5), normalize=True, value_range=(-1, 1))
 
 
 def save_video(xseq, path):

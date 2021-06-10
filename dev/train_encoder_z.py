@@ -479,7 +479,7 @@ def train(args, loader, encoder, generator, discriminator, discriminator_z, g1,
                         os.path.join(args.log_dir, 'sample', f"{str(i).zfill(6)}.png"),
                         nrow=nrow,
                         normalize=True,
-                        range=(-1, 1),
+                        value_range=(-1, 1),
                     )
                     e_eval.train()
 

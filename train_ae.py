@@ -118,6 +118,22 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
     return path_penalty, path_mean.detach(), path_lengths
 
 
+def calculate_adaptive_weight(nll_loss, g_loss, last_layer=None):
+    if last_layer is None:
+        return 1.0
+    nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)
+    g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)
+    if isinstance(last_layer, (list, tuple)):
+        nll_grads = torch.cat([v.view(-1) for v in nll_grads])
+        g_grads = torch.cat([v.view(-1) for v in g_grads])
+    else:
+        nll_grads = nll_grads[0]
+        g_grads = g_grads[0]
+    d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
+    d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
+    return d_weight
+
+
 def make_noise(batch, latent_dim, n_noise, device):
     if n_noise == 1:
         return torch.randn(batch, latent_dim, device=device)
@@ -209,6 +225,14 @@ def train(args, loader, loader2, generator, encoder, discriminator,
         g_module = generator
         e_module = encoder
         d_module = discriminator
+    
+    d_weight = torch.tensor(1.0, device=device)
+    last_layer = None
+    if args.use_adaptive_weight:
+        if args.distributed:
+            last_layer = generator.module.get_last_layer()
+        else:
+            last_layer = generator.get_last_layer()
 
     # accum = 0.5 ** (32 / (10 * 1000))
     ada_aug_p = args.augment_p if args.augment_p > 0 else 0.0
@@ -313,8 +337,16 @@ def train(args, loader, loader2, generator, encoder, discriminator,
                     rec_img_aug = rec_img
                 rec_pred = discriminator(rec_img_aug)
                 adv_loss = g_nonsaturating_loss(rec_pred)
+            
+            if args.use_adaptive_weight and i >= args.disc_iter_start:
+                nll_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg
+                g_loss = adv_loss * args.lambda_adv
+                d_weight = calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
 
-            ae_loss = pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + adv_loss * args.lambda_adv
+            ae_loss = (
+                pix_loss * args.lambda_pix + vgg_loss * args.lambda_vgg + 
+                d_weight * adv_loss * args.lambda_adv
+            )
             loss_dict["ae"] = ae_loss
             loss_dict["pix"] = pix_loss
             loss_dict["vgg"] = vgg_loss
@@ -378,6 +410,7 @@ def train(args, loader, loader2, generator, encoder, discriminator,
                     f"d: {d_loss_val:.4f}; ae: {ae_loss_val:.4f}; r1: {r1_val:.4f}; "
                     f"path: {path_loss_val:.4f}; mean path: {mean_path_length_avg:.4f}; "
                     f"augment: {ada_aug_p:.4f}; "
+                    f"d_weight: {d_weight.item():.4f}; "
                     f"pix: {pix_loss_val:.4f}; vgg: {vgg_loss_val:.4f}; adv: {adv_loss_val:.4f}"
                 )
             )
@@ -422,6 +455,7 @@ def train(args, loader, loader2, generator, encoder, discriminator,
                             f"real_score: {real_score_val:.4f}; recx_score: {recx_score_val:.4f}; "
                             f"pix: {avg_pix_loss.avg:.4f}; vgg: {avg_vgg_loss.avg:.4f}; "
                             f"ref_pix: {ref_pix_loss.item():.4f}; ref_vgg: {ref_vgg_loss.item():.4f}; "
+                            f"d_weight: {d_weight.item():.4f}; "
                             f"\n"
                         )
                     )
@@ -637,6 +671,8 @@ if __name__ == "__main__":
     parser.add_argument("--no_ema_e", action='store_true')
     parser.add_argument("--no_ema_g", action='store_true')
     parser.add_argument("--which_metric", type=str, nargs='*', default=['fid_recon'])
+    parser.add_argument("--use_adaptive_weight", action='store_true', help="adaptive weight borrowed from VQGAN")
+    parser.add_argument("--disc_iter_start", type=int, default=20000)
 
     args = parser.parse_args()
     util.seed_everything()

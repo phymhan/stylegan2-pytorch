@@ -286,10 +286,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
             fake_img, _ = generator(noise)
             if args.augment:
                 real_img_aug, _ = augment(real_img, ada_aug_p)
-                fake_img, _ = augment(fake_img, ada_aug_p)
+                fake_img_aug, _ = augment(fake_img, ada_aug_p)
             else:
                 real_img_aug = real_img
-            fake_pred = discriminator(fake_img)
+                fake_img_aug = fake_img
+            fake_pred = discriminator(fake_img_aug)
             real_pred = discriminator(real_img_aug)
             d_loss_fake = F.softplus(fake_pred).mean()
             d_loss_real = F.softplus(-real_pred).mean()
@@ -346,10 +347,11 @@ def train(args, loader, loader2, generator, encoder, discriminator, discriminato
                 rec_img, _ = generator([latent_real], input_is_latent=input_is_latent)
                 if args.augment:
                     real_img_aug, _ = augment(real_img, ada_aug_p2)
-                    rec_img, _ = augment(rec_img, ada_aug_p2)
+                    rec_img_aug, _ = augment(rec_img, ada_aug_p2)
                 else:
                     real_img_aug = real_img
-                rec_pred = discriminator2(rec_img)
+                    rec_img_aug = rec_img
+                rec_pred = discriminator2(rec_img_aug)
                 real_pred = discriminator2(real_img_aug)
                 d2_loss_rec = F.softplus(rec_pred).mean()
                 d2_loss_real = F.softplus(-real_pred).mean()
